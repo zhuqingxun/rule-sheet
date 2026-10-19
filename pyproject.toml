@@ -1,0 +1,44 @@
+[project]
+name = "rule-sheet"
+version = "0.1.0"
+description = "把 Excel 比对更新规则写成非编码人员可读可改的决策表 / YAML, 由同一个解释器执行"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "zhuqingxun" }]
+dependencies = [
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+rule-sheet = "rule_sheet.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**" = ["E501"]  # 样例生成器里的规则表按列对齐, 允许长行
+
+[tool.ruff.format]
+exclude = ["examples/**"]  # 保留样例生成器里手工对齐的表格

@@ -2,15 +2,16 @@
 # requires-python = ">=3.11"
 # dependencies = ["openpyxl>=3.1"]
 # ///
-"""生成样例数据（两份业务 Excel）和 Excel 版决策表。
+"""生成样例数据（两份业务 Excel）和 Excel 版决策表, 全部写到本脚本所在目录。
 
-运行:
-    uv run --script make_samples.py
+运行 (任选其一):
+    uv run --script examples/customer-sync/make_samples.py
+    uv run python examples/customer-sync/make_samples.py
 
 产物:
-    data/客户主表.xlsx      被更新的左表
-    data/本月流水.xlsx      参照用的右表
-    rules/规则_决策表.xlsx  四张 sheet: 匹配设置 / 变量定义 / 决策表 / 测试
+    客户主表.xlsx      被更新的左表
+    本月流水.xlsx      参照用的右表
+    规则_决策表.xlsx   四张 sheet: 匹配设置 / 变量定义 / 决策表 / 测试
 """
 from __future__ import annotations
 
@@ -37,7 +38,6 @@ FILL_BY_KIND = {
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 BOLD = Font(bold=True)
-HEADER_FILL = PatternFill("solid", fgColor="D9D9D9")
 
 
 def put(ws: Worksheet, row: int, col: int, value: Any, *, bold: bool = False,
@@ -83,7 +83,7 @@ MASTER_ROWS = [
     ["C005", "蓝海餐饮", "普通", "试用", 2000,  "13800000005", date(2026, 10, 10)],  # 偏差 30% 但状态试用, 电话变 -> R3
     ["C006", "鼎盛集团", "VIP",  "活跃", 12000, "13800000006", date(2026, 10, 11)],  # 偏差 8.3% 且电话变     -> R1 + R3
     ["C007", "旧友商行", "普通", "休眠", 0,     "13800000007", date(2025, 12, 1)],   # 已休眠, 本月缺失       -> 无 (R2 的 != 休眠 排除)
-    ["C008", "金桥投资", "金卡", "活跃", 9000,  "13800000008", date(2026, 10, 1)],   # 偏差 4%, 金卡, 本月电话空 -> R4
+    ["C008", "金桥投资", "金卡", "活跃", 9000,  "13800000008", date(2026, 10, 1)],   # 偏差 4%, 金卡, 本月电话空 -> R4 + R5a
 ]
 
 MONTHLY_HEADER = ["客户编号", "金额", "电话", "交易日期"]
@@ -102,20 +102,20 @@ def build_data() -> None:
     ws.title = "客户主表"
     write_data_sheet(ws, MASTER_HEADER, MASTER_ROWS, text_cols={6}, date_cols={7},
                      widths=[10, 12, 8, 8, 10, 16, 12])
-    wb.save(ROOT / "data" / "客户主表.xlsx")
+    wb.save(ROOT / "客户主表.xlsx")
 
     wb = Workbook()
     ws = wb.active
     ws.title = "本月流水"
     write_data_sheet(ws, MONTHLY_HEADER, MONTHLY_ROWS, text_cols={3}, date_cols={4},
                      widths=[10, 10, 16, 12])
-    wb.save(ROOT / "data" / "本月流水.xlsx")
+    wb.save(ROOT / "本月流水.xlsx")
 
 
 # ---------------------------------------------------------------------------
 # 规则工作簿
 # ---------------------------------------------------------------------------
-def write_kv_sheet(ws: Worksheet, title: tuple[str, str, str], rows: list[tuple[Any, Any, str]],
+def write_kv_sheet(ws: Worksheet, title: tuple[str, str, str], rows: list[tuple[Any, Any, Any]],
                    widths: list[int]) -> None:
     for c, name in enumerate(title, start=1):
         put(ws, 1, c, name, bold=True, fill="D9D9D9")
@@ -131,7 +131,7 @@ def write_rule_table(ws: Worksheet, top_note: list[Any], kinds: list[str], names
     """三行表头: 第 1 行元信息, 第 2 行列类型(输入/输出), 第 3 行变量名; 第 4 行起每行一条规则。"""
     for c, val in enumerate(top_note, start=1):
         put(ws, 1, c, val, bold=(c == 1), fill=FILL_BY_KIND["说明"] if c == 3 else None)
-    for c, (kind, name) in enumerate(zip(kinds, names), start=1):
+    for c, (kind, name) in enumerate(zip(kinds, names, strict=True), start=1):
         fill = FILL_BY_KIND.get(kind)
         put(ws, 2, c, kind, bold=True, fill=fill)
         put(ws, 3, c, name, bold=True, fill=fill)
@@ -140,8 +140,8 @@ def write_rule_table(ws: Worksheet, top_note: list[Any], kinds: list[str], names
             kind = kinds[c - 1]
             fill = FILL_BY_KIND.get(kind) if kind in ("输入", "输出", "期望") else None
             put(ws, r, c, val, fill=fill)
-            ws.cell(row=r, column=c).alignment = Alignment(horizontal="center" if kind in ("输入", "规则ID", "优先级", "用例") else "left",
-                                                           vertical="center")
+            horizontal = "center" if kind in ("输入", "规则ID", "优先级", "用例") else "left"
+            ws.cell(row=r, column=c).alignment = Alignment(horizontal=horizontal, vertical="center")
     ws.freeze_panes = "C4"
     set_widths(ws, widths)
 
@@ -153,8 +153,8 @@ def build_rules() -> None:
     ws = wb.active
     ws.title = "匹配设置"
     write_kv_sheet(ws, ("设置项", "值", "说明"), [
-        ("左表", "data/客户主表.xlsx", "被更新的表, 路径相对 run_rules.py 所在目录"),
-        ("右表", "data/本月流水.xlsx", "参照表, 只读"),
+        ("左表", "客户主表.xlsx", "被更新的表, 相对路径以本规则文件所在目录为基准"),
+        ("右表", "本月流水.xlsx", "参照表, 只读"),
         ("左表别名", "主表", "规则里引用左表字段的前缀, 如 主表.状态"),
         ("右表别名", "本月", "规则里引用右表字段的前缀, 如 本月.金额"),
         ("匹配键", "客户编号", "两表按此列对行, 多列用逗号分隔"),
@@ -170,7 +170,7 @@ def build_rules() -> None:
         ("距上次活跃天数", "天数差(基准日期, 主表.上次活跃)", "基准日期见「匹配设置」"),
         (None, None, None),
         ("内置变量", None, "主表.<列名>  本月.<列名>  本月.存在(右表是否匹配到)  基准日期"),
-        ("可用函数", None, "abs  round  天数差(晚, 早)  非空(x)  为空(x)"),
+        ("可用函数", None, "abs  round  天数差(晚, 早)  非空(x)  为空(x)  属于(x, 值1, 值2, ...)"),
     ], widths=[16, 44, 52])
 
     # ---- sheet 3: 决策表 ----------------------------------------------------
@@ -217,12 +217,10 @@ def build_rules() -> None:
         widths=[6, 10, 11, 8, 10, 15, 14, 14, 8, 14, 10, 20, 12, 40],
     )
 
-    wb.save(ROOT / "rules" / "规则_决策表.xlsx")
+    wb.save(ROOT / "规则_决策表.xlsx")
 
 
 if __name__ == "__main__":
-    (ROOT / "data").mkdir(exist_ok=True)
-    (ROOT / "rules").mkdir(exist_ok=True)
     build_data()
     build_rules()
-    print("已生成: data/客户主表.xlsx  data/本月流水.xlsx  rules/规则_决策表.xlsx")
+    print(f"已生成到 {ROOT}: 客户主表.xlsx  本月流水.xlsx  规则_决策表.xlsx")

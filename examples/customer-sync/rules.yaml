@@ -1,12 +1,13 @@
 # 与 规则_决策表.xlsx 完全相同的一组规则, 换成 YAML 写法。
-# 两者由同一个解释器执行:  uv run --script run_rules.py rules/rules.yaml
+# 两者由同一个解释器执行:  uv run rule-sheet run examples/customer-sync/rules.yaml
 #
 # 和决策表的差别: 条件不再是「单元格里的一元测试」, 而是完整的表达式,
 # 每条一行, 全部满足才命中。表达式里可以直接写变量名、比较、函数。
+# 相对路径以本文件所在目录为基准。
 
 匹配:
-  左表: data/客户主表.xlsx
-  右表: data/本月流水.xlsx
+  左表: 客户主表.xlsx
+  右表: 本月流水.xlsx
   左表别名: 主表
   右表别名: 本月
   匹配键: 客户编号
