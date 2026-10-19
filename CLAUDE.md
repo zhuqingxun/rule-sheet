@@ -42,14 +42,14 @@ uv run --script examples/customer-sync/make_samples.py     # 改了样例设计�
 
 `load_rules` 按后缀分派到 `load_excel_rules` / `load_yaml_rules`, 两者汇合成同一个 `RuleSet`; 之后 `engine.run` 依次: `run_tests` -> `read_table` 读左右表 -> `build_namespace` 合并 -> `add_derived` 派生变量 -> `apply_rules` -> 拼审计列 -> `write_xlsx_safely` (被 Excel 占用时自动 `_v2`/`_v3`)。
 
-- **一切向量化**: `Namespace` 是 `{变量名: pd.Series}` (整列), `Condition = Callable[[Namespace], Series]` 返回布尔 mask, `apply_rules` 用 `Series.mask` 按优先级倒序覆盖写入。不要在规则层写逐行循环
+- **一切向量化**: `Namespace` 是 `{变量名: pd.Series}` (整列); `Condition = Callable[[Namespace], Any]` 可返回含 NaN 的 Series 或标量, 由 `conditions.to_mask` 统一归一成布尔 mask (NaN 视为不命中); `apply_rules` 用 `Series.mask` 按优先级倒序覆盖写入。不要在规则层写逐行循环
 - **内嵌测试复用引擎**: `run_tests` 把每条用例构造成 1 行的 `Namespace`, 走同一套 `add_derived(lenient=True)` + `apply_rules`。改 `apply_rules` 语义会同时影响真实数据与用例
 - **两前端的分叉点** (改一边必须查另一边):
   - 条件: Excel 每个输入格一个 `cell_condition` (走 `unary_test`); YAML 整棵 `当:` 树一个 `build_condition` (走 `eval_expr`)
   - `rs.variables` (用例未给即视为空的变量清单): Excel 直接取表头输入列; YAML 靠 `<别名>.\w+` 正则扫描 `当` / `则` / `变量` 的文本。YAML 里新增写变量名的位置要同步进这段扫描
   - `rs.outputs` 顺序: Excel 按表头输出列; YAML 按 `则:` 首次出现
 - **表达式求值**: `eval_expr` 把中文变量名按长度降序替换为 `_vN` 再 `eval`, 可用函数只有 `expressions.FUNCS` 里那几个; 加内置函数就加在这个 dict
-- **Excel 版式契约** (`loaders._parse_header` 与 `make_samples.py` 必须一致): sheet 名固定为 匹配设置 / 变量定义 / 决策表 / 测试; 决策表 B1 为命中策略, 第 2 行是列类型 (规则ID / 优先级 / 说明 / 输入 / 输出; 测试 sheet 为 用例 / 输入 / 期望), 第 3 行是变量名, 第 4 行起正文; 优先级留空取 `1000 + 行序`
+- **Excel 版式契约** (`loaders._parse_header` 与 `make_samples.py` 必须一致): sheet 名固定为 匹配设置 / 变量定义 / 决策表 / 测试 (匹配设置 与 决策表 缺失即报错, 另两个可选); 决策表 B1 为命中策略, 第 2 行是列类型 (规则ID / 优先级 / 说明 / 输入 / 输出; 测试 sheet 为 用例 / 输入 / 期望), 第 3 行是变量名, 第 4 行起正文; 优先级留空取 `1000 + 行序`
 
 ## 核心语义约定 (改代码前先读)
 
