@@ -1,0 +1,12 @@
+# 运行产物
+output/
+
+# Excel 打开时的锁文件
+~$*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
