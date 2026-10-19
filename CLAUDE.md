@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## 项目定位
 
 rule-sheet: 把「两份 Excel 互相比较, 按规则更新字段」的业务规则从代码里抽出来, 写成非编码人员能读、能改的规则文件 (Excel 决策表 / YAML), 由 Python 解释器执行。
@@ -28,11 +30,26 @@ uv sync
 uv run rule-sheet run  examples/customer-sync/规则_决策表.xlsx
 uv run rule-sheet run  examples/customer-sync/rules.yaml
 uv run pytest
+uv run pytest tests/test_examples.py::test_both_frontends_agree   # 单个用例
+uv run pytest -k excel                                            # 按名字筛选 (参数化 id 为 excel / yaml)
 uv run ruff check . ; uv run ruff format --check .
 uv run --script examples/customer-sync/make_samples.py     # 改了样例设计后重新生成 xlsx
 ```
 
 验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (5 行变更) 且各自 8 条内嵌用例通过。改解释器语义后必须跑全量, 不要只跑一个前端。
+
+## 执行管线 (跨文件, 改引擎前先读)
+
+`load_rules` 按后缀分派到 `load_excel_rules` / `load_yaml_rules`, 两者汇合成同一个 `RuleSet`; 之后 `engine.run` 依次: `run_tests` -> `read_table` 读左右表 -> `build_namespace` 合并 -> `add_derived` 派生变量 -> `apply_rules` -> 拼审计列 -> `write_xlsx_safely` (被 Excel 占用时自动 `_v2`/`_v3`)。
+
+- **一切向量化**: `Namespace` 是 `{变量名: pd.Series}` (整列), `Condition = Callable[[Namespace], Series]` 返回布尔 mask, `apply_rules` 用 `Series.mask` 按优先级倒序覆盖写入。不要在规则层写逐行循环
+- **内嵌测试复用引擎**: `run_tests` 把每条用例构造成 1 行的 `Namespace`, 走同一套 `add_derived(lenient=True)` + `apply_rules`。改 `apply_rules` 语义会同时影响真实数据与用例
+- **两前端的分叉点** (改一边必须查另一边):
+  - 条件: Excel 每个输入格一个 `cell_condition` (走 `unary_test`); YAML 整棵 `当:` 树一个 `build_condition` (走 `eval_expr`)
+  - `rs.variables` (用例未给即视为空的变量清单): Excel 直接取表头输入列; YAML 靠 `<别名>.\w+` 正则扫描 `当` / `则` / `变量` 的文本。YAML 里新增写变量名的位置要同步进这段扫描
+  - `rs.outputs` 顺序: Excel 按表头输出列; YAML 按 `则:` 首次出现
+- **表达式求值**: `eval_expr` 把中文变量名按长度降序替换为 `_vN` 再 `eval`, 可用函数只有 `expressions.FUNCS` 里那几个; 加内置函数就加在这个 dict
+- **Excel 版式契约** (`loaders._parse_header` 与 `make_samples.py` 必须一致): sheet 名固定为 匹配设置 / 变量定义 / 决策表 / 测试; 决策表 B1 为命中策略, 第 2 行是列类型 (规则ID / 优先级 / 说明 / 输入 / 输出; 测试 sheet 为 用例 / 输入 / 期望), 第 3 行是变量名, 第 4 行起正文; 优先级留空取 `1000 + 行序`
 
 ## 核心语义约定 (改代码前先读)
 
@@ -54,6 +71,8 @@ uv run --script examples/customer-sync/make_samples.py     # 改了样例设计�
 - 样例数据的每一行对应一种规则情形 (见 README「样例数据设计」), 加规则时同步加数据行、Excel 测试 sheet 用例、YAML 测试用例, 并重新生成 xlsx
 - 生成的 xlsx 进 git (体积小, 便于直接打开看), `examples/*/output/` 不进
 - 版本号在 `pyproject.toml` 与 `src/rule_sheet/__init__.py` 两处, 同步改
+- `examples/**` 被 ruff format 排除并忽略 E501: `make_samples.py` 里的规则表是手工按列对齐的, 不要去「修」它的格式
+- `model.TestCase` 靠 `__test__ = False` 防止被 pytest 当用例收集; 新增 `Test` 开头的 dataclass 同样要加
 
 ## 已知局限 (候选 roadmap, 未排序)
 
