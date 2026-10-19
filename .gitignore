@@ -10,3 +10,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+
+# codegraph index cache
+.codegraph/
+
+# CodeAgentCLI 项目级元数据
+.cac/
