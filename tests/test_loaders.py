@@ -93,6 +93,26 @@ def test_yaml_hyphen_names_and_unspaced_subtraction(tmp_path):
     assert [(o.passed, o.hit, o.error) for o in outcomes] == [(True, "S2", ""), (True, "S1", "")]
 
 
+def test_yaml_backtick_name_end_to_end(tmp_path):
+    """反引号名字从 YAML 文件走完整路径: 以反引号开头的表达式整行要加引号 (YAML 的保留字符),
+    扫描到的名字在用例没给时置空、给了就参与求值, 两种情况都不报错。"""
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "匹配: {左表别名: 本期, 右表别名: 上期}\n"
+        "规则:\n"
+        '  - 编号: R1\n    当:\n      - "`本期.金额(万元)` > 100"\n    则:\n      标记: 大额\n'
+        "测试:\n"
+        "  - 用例: 没给, 视为空, 不命中\n    输入: {}\n    期望: {}\n"
+        "  - 用例: 给了就命中\n    输入: {本期.金额(万元): 150}\n    期望: {标记: 大额}\n",
+        encoding="utf-8",
+    )
+    rs = load_yaml_rules(p)
+    assert rs.variables == ["本期.金额(万元)"]
+    from rule_sheet.engine import run_tests
+
+    assert [(o.passed, o.hit, o.error) for o in run_tests(rs)] == [(True, "", ""), (True, "R1", "")]
+
+
 def test_yaml_rule_without_then_and_policy_validation(tmp_path):
     p = tmp_path / "r.yaml"
     p.write_text(

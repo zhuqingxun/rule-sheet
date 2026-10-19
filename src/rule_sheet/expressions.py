@@ -89,7 +89,7 @@ def eval_expr(expr: str, ns: Namespace) -> Any:
     except NameError as exc:
         raise ValueError(
             f"表达式求值失败: {expr!r} (「{exc.name}」既不是变量也不是可用函数; "
-            f"字段名含特殊符号时可用反引号包裹整个名字, 如 `本期.类别-会议`)"
+            f"字段名含特殊符号时可用反引号包裹整个名字, 如 `本期.金额(万元)`)"
         ) from exc
     except Exception as exc:
         raise ValueError(f"表达式求值失败: {expr!r} ({exc})") from exc
