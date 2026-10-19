@@ -20,7 +20,8 @@ uv 项目, src 布局, `rule-sheet` 命令, pytest 套件。2026-10-19 从 `D:/C
 | `src/rule_sheet/loaders.py` | `load_excel_rules` / `load_yaml_rules` -> `RuleSet` |
 | `src/rule_sheet/engine.py` | `build_namespace` / `apply_rules` / `run_tests` / `run` 整体流程 / 写出 |
 | `src/rule_sheet/cli.py` | `rule-sheet run|test` |
-| `examples/customer-sync/` | 自带样例: 两份数据 + 决策表 + YAML + Gherkin + 生成脚本 |
+| `examples/customer-sync/` | 自带样例: 两份数据 + 决策表 + YAML + Gherkin + 生成脚本 (逐列合并的 `优先级` 策略) |
+| `examples/status-machine/` | 第二个样例: 字段名含 `-` / 输出格 `清空` / 命中策略 `首次命中` (2026-10-19 为 issue #1-#4 加) |
 | `tests/` | 单元格语法 / 表达式 / 引擎 / 加载器 / 端到端 |
 
 ## 运行与验证
@@ -34,9 +35,10 @@ uv run pytest tests/test_examples.py::test_both_frontends_agree   # 单个用例
 uv run pytest -k excel                                            # 按名字筛选 (参数化 id 为 excel / yaml)
 uv run ruff check . ; uv run ruff format --check .
 uv run --script examples/customer-sync/make_samples.py     # 改了样例设计后重新生成 xlsx
+uv run --script examples/status-machine/make_samples.py    # 第二个样例同理
 ```
 
-验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (5 行变更) 且各自 8 条内嵌用例通过。改解释器语义后必须跑全量, 不要只跑一个前端。
+验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 4 行变更 / 6 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败)。改解释器语义后必须跑全量, 不要只跑一个前端。
 
 ## 执行管线 (跨文件, 改引擎前先读)
 
@@ -46,10 +48,10 @@ uv run --script examples/customer-sync/make_samples.py     # 改了样例设计�
 - **内嵌测试复用引擎**: `run_tests` 把每条用例构造成 1 行的 `Namespace`, 走同一套 `add_derived(lenient=True)` + `apply_rules`。改 `apply_rules` 语义会同时影响真实数据与用例
 - **两前端的分叉点** (改一边必须查另一边):
   - 条件: Excel 每个输入格一个 `cell_condition` (走 `unary_test`); YAML 整棵 `当:` 树一个 `build_condition` (走 `eval_expr`)
-  - `rs.variables` (用例未给即视为空的变量清单): Excel 直接取表头输入列; YAML 靠 `<别名>.\w+` 正则扫描 `当` / `则` / `变量` 的文本。YAML 里新增写变量名的位置要同步进这段扫描
+  - `rs.variables` (用例未给即视为空的变量清单): Excel 直接取表头输入列; YAML 靠 `expressions.find_names` 扫描 `当` / `则` / `变量` 的文本 (名字可含 `-` `/` 全角括号, `-`/`/` 后紧跟 `别名.`/数字/已知名字才算运算符; 反引号包裹的整体算一个名字)。YAML 里新增写变量名的位置要同步进这段扫描。扫描器宁可少认不可多认: 多认会把 `本期.金额-上期.金额` 整体当成空变量, 测试静默算错
   - `rs.outputs` 顺序: Excel 按表头输出列; YAML 按 `则:` 首次出现
-- **表达式求值**: `eval_expr` 把中文变量名按长度降序替换为 `_vN` 再 `eval`, 可用函数只有 `expressions.FUNCS` 里那几个; 加内置函数就加在这个 dict
-- **Excel 版式契约** (`loaders._parse_header` 与 `make_samples.py` 必须一致): sheet 名固定为 匹配设置 / 变量定义 / 决策表 / 测试 (匹配设置 与 决策表 缺失即报错, 另两个可选); 决策表 B1 为命中策略, 第 2 行是列类型 (规则ID / 优先级 / 说明 / 输入 / 输出; 测试 sheet 为 用例 / 输入 / 期望), 第 3 行是变量名, 第 4 行起正文; 优先级留空取 `1000 + 行序`
+- **表达式求值**: `eval_expr` 把中文变量名按长度降序替换为 `_vN` 再 `eval` (替换在 Python 解析之前, 名字含任何字符都行, 只要在 ns 里; 反引号 `` `名字` `` 整体查), 可用函数只有 `expressions.FUNCS` 里那几个; 加内置函数就加在这个 dict, 且必须对 Series 逐行生效 (所以不开放 `float` / `str` / `int`, 它们对整列不是逐行的)
+- **Excel 版式契约** (`loaders._parse_header` 与两个 `make_samples.py` 必须一致): sheet 名固定为 匹配设置 / 变量定义 / 决策表 / 测试 (匹配设置 与 决策表 缺失即报错, 另两个可选); 决策表 B1 为命中策略 (加载时按 `model.HIT_POLICIES` 校验), 第 2 行是列类型 (规则ID / 优先级 / 说明 / 输入 / 输出; 测试 sheet 为 用例 / 输入 / 期望), 第 3 行是变量名, 第 4 行起正文; 优先级留空取 `1000 + 行序`。工作簿用 `data_only=False` 读: 以 `=` 开头的格 (如 `= 本期.类别-会议`) 会被 Excel / openpyxl 存成公式, `data_only=True` 读到 None 条件就静默变成不关心 (2026-10-19 实测); 生成脚本写这类格要 `cell.data_type = "s"`
 
 ## 核心语义约定 (改代码前先读)
 
@@ -60,10 +62,10 @@ uv run --script examples/customer-sync/make_samples.py     # 改了样例设计�
 - **空值语义**: 空值参与任何比较都不成立 (SQL 风格); `not(...)` 同样只对有值的格成立, 仅 `not(为空)` / `not(非空)` 是纯否定。YAML 表达式是 Python 语义, 需要自己写 `非空()`
 - **布尔词**: `是` / `否` 只在被比较的列本身是布尔列时转成 True/False, 文本列里的「是」是普通文本
 - **YAML 条件组合**: 列表默认 `全部满足`, `任一满足` / `不满足` 可嵌套
-- **命中策略**: `优先级` 按输出列逐列合并 (数字小者胜, 未写该列的规则不参与); `唯一` 多命中即报错并指出匹配键值
-- **输出格**: `-` 不改 / 字面值 / 变量名复制 / `=表达式`
-- **审计列**: 输出文件追加 `命中规则`、`变更明细`
-- **测试先行**: 规则文件内的测试用例不过, `run` 不处理真实数据; 用例没提到的变量视为空值
+- **命中策略**: `优先级` 按输出列逐列合并 (数字小者胜, 未写该列的规则不参与); `唯一` 多命中即报错并指出匹配键值; `首次命中` 每行只算优先级数字最小的一条 (同优先级按书写顺序), 实现是在逐列合并前把 masks 按优先级做成互斥, 没有输出的规则也能拦住一行。设计取舍见 `docs/设计架构.md` 5.2
+- **输出格**: `-` 不改 / `清空` 写空值 (`resolve_output` 返回 `model.CLEAR` 哨兵, 与 `-` 的 None 必须区分) / 字面值 / 变量名复制 / `=表达式`
+- **审计列**: 输出文件追加 `命中规则` (`首次命中` 下只记赢的那条)、`变更明细` (清空显示 `旧值 -> 空`)
+- **测试先行**: 规则文件内的测试用例不过, `run` 不处理真实数据; 用例没提到的变量视为空值; 期望格留空 = 不变, 写 `清空` / `为空` = 应为空值 (不用 YAML `null`, 否则与 Excel 空格分叉)
 
 ## 约定
 

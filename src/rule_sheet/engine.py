@@ -11,10 +11,10 @@ from typing import Any
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
-from .conditions import resolve_output, to_mask
+from .conditions import ns_index, resolve_output, to_mask
 from .expressions import eval_expr
 from .loaders import load_rules
-from .model import BASE_DATE_VAR, EXIST_VAR, TRUE_WORDS, Namespace, Rule, RuleSet
+from .model import BASE_DATE_VAR, CLEAR, EXIST_VAR, EXPECT_NULL_WORDS, TRUE_WORDS, Namespace, Rule, RuleSet
 
 Mask = pd.Series
 
@@ -115,10 +115,12 @@ def apply_rules(
 
     命中策略 优先级: 每个输出列取优先级数字最小的命中规则的值, 未写该列的规则不参与。
     命中策略 唯一: 任何行命中多条即报错。
+    命中策略 首次命中: 每行只算优先级数字最小的那条命中 (同优先级按书写顺序), 其余规则对该行视为未命中;
+        之后走与 优先级 相同的逐列合并, 此时每行至多一条规则, 结果就是该规则的输出 (- 的列保持原值)。
     """
-    index = next(iter(ns.values())).index
+    index = ns_index(ns)
     masks = {r.rule_id: rule_mask(r, ns, index) for r in rs.rules}
-    ordered = sorted(rs.rules, key=lambda r: r.priority)
+    ordered = sorted(rs.rules, key=lambda r: r.priority)  # 稳定排序: 同优先级保持书写顺序
 
     if rs.hit_policy == "唯一":
         hits = sum((masks[r.rule_id].astype(int) for r in rs.rules), pd.Series(0, index=index))
@@ -131,6 +133,12 @@ def apply_rules(
                 for i in bad.index
             }
             raise ValueError(f"命中策略为「唯一」, 但以下行命中多条规则: {detail}")
+    elif rs.hit_policy == "首次命中":
+        taken = pd.Series(False, index=index)
+        for rule in ordered:
+            effective = masks[rule.rule_id] & ~taken
+            taken = taken | effective
+            masks[rule.rule_id] = effective
 
     results: dict[str, pd.Series] = {}
     for col in rs.outputs:
@@ -142,7 +150,9 @@ def apply_rules(
             val = resolve_output(rule.outputs.get(col), ns)
             if val is None:
                 continue
-            if isinstance(val, pd.Series):
+            if val is CLEAR:
+                val = None
+            elif isinstance(val, pd.Series):
                 val = val.astype(object)
             cur = cur.mask(masks[rule.rule_id], val)
         results[col] = cur
@@ -240,8 +250,12 @@ def run_tests(rs: RuleSet) -> list[TestOutcome]:
         for col in rs.outputs:
             exp = tc.expected.get(col)
             got = results[col].iloc[0]
-            unchanged = exp is None or (isinstance(exp, str) and exp.strip() == "")
-            want = originals[col].iloc[0] if unchanged else exp
+            if exp is None or (isinstance(exp, str) and exp.strip() == ""):
+                want = originals[col].iloc[0]  # 期望留空 = 该列不变
+            elif isinstance(exp, str) and exp.strip() in EXPECT_NULL_WORDS:
+                want = None  # 期望写 清空 / 为空 = 该列应为空值
+            else:
+                want = exp
             if not same(got, want):
                 problems.append(f"{col}: 期望 {fmt(want)}, 实际 {fmt(got)}")
         outcomes.append(TestOutcome(tc.name, not problems, hit=hit_ids.iloc[0], problems=problems))

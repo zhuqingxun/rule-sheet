@@ -9,11 +9,24 @@ from typing import Any
 TRUE_WORDS = {"是", "true", "True", "TRUE", "yes"}
 FALSE_WORDS = {"否", "false", "False", "FALSE", "no"}
 BLANK_WORDS = {"", "-", "—", "任意"}
+CLEAR_WORDS = {"清空", "置空"}  # 输出格: 把目标列写成空值 (区别于 - 的「不改」)
+EXPECT_NULL_WORDS = CLEAR_WORDS | {"为空"}  # 测试用例期望格: 期望该列为空 (留空仍是「不变」)
+HIT_POLICIES = ("优先级", "唯一", "首次命中")
 EXIST_VAR = "存在"  # 右表是否匹配到, 实际变量名是 <右表别名>.存在
 BASE_DATE_VAR = "基准日期"
 
 Namespace = dict[str, Any]
 Condition = Callable[[Namespace], Any]
+
+
+class _Clear:
+    """resolve_output 的返回哨兵: 命中后把该列清空。None 仍表示「不改」。"""
+
+    def __repr__(self) -> str:
+        return "清空"
+
+
+CLEAR = _Clear()
 
 
 @dataclass

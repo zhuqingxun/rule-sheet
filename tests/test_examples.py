@@ -7,9 +7,10 @@ from rule_sheet import cli
 from rule_sheet.engine import run, run_tests
 from rule_sheet.loaders import load_rules
 
-from .conftest import EXCEL_RULES, YAML_RULES
+from .conftest import EXCEL_RULES, STATUS_EXCEL, STATUS_YAML, YAML_RULES
 
 FRONTENDS = pytest.mark.parametrize("rules_file", [EXCEL_RULES, YAML_RULES], ids=["excel", "yaml"])
+STATUS_FRONTENDS = pytest.mark.parametrize("rules_file", [STATUS_EXCEL, STATUS_YAML], ids=["excel", "yaml"])
 
 EXPECTED_HITS = {
     "C001": "R1",
@@ -64,6 +65,55 @@ def test_written_file_has_audit_columns(tmp_path):
     back = pd.read_excel(res.written)
     assert list(back.columns)[-2:] == ["命中规则", "变更明细"]
     assert len(back) == 8
+
+
+# ---------------------------------------------------------------------------
+# 第二个样例 status-machine: 字段名含 - / 输出格 清空 / 命中策略 首次命中
+# ---------------------------------------------------------------------------
+
+STATUS_HITS = {"P001": "S1", "P002": "S2", "P003": "S3", "P004": "S4", "P005": "S1", "P006": "S4"}
+
+
+@STATUS_FRONTENDS
+def test_status_embedded_cases_all_pass(rules_file):
+    rs = load_rules(rules_file)
+    assert rs.hit_policy == "首次命中"
+    outcomes = run_tests(rs)
+    assert len(outcomes) == 6
+    assert all(o.passed for o in outcomes), [(o.name, o.problems, o.error) for o in outcomes if not o.passed]
+
+
+@STATUS_FRONTENDS
+def test_status_real_data_first_match(rules_file, tmp_path):
+    res = run(rules_file, output=tmp_path / "out.xlsx")
+    assert not res.stopped_by_tests and res.out is not None
+    assert dict(zip(res.out["岗位编码"], res.out["命中规则"], strict=True)) == STATUS_HITS  # 每行只记赢的那条
+    row = res.out.set_index("岗位编码")
+    assert pd.isna(row.loc["P001", "状态-会议"])  # S1 清空
+    assert pd.isna(row.loc["P002", "状态-会议"])  # S2 拦截: 优先级 策略下会被兜底 S4 写成 01-新增
+    assert row.loc["P003", "状态-会议"] == "02-进展更新"
+    assert row.loc["P004", "状态-会议"] == "01-新增"
+    assert row.loc["P006", "状态-会议"] == "01-新增"
+    assert row.loc["P001", "变更明细"] == "状态-会议: 01-新增 -> 空"
+    assert len(res.changed) == 4
+    back = pd.read_excel(res.written)
+    assert pd.isna(back.set_index("岗位编码").loc["P001", "状态-会议"])  # 写出的 Excel 里是真空白
+
+
+def test_status_frontends_agree(tmp_path):
+    a = run(STATUS_EXCEL, output=tmp_path / "a.xlsx").out
+    b = run(STATUS_YAML, output=tmp_path / "b.xlsx").out
+    cols = ["岗位编码", "状态-会议", "命中规则", "变更明细"]
+    pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
+
+
+def test_status_needs_first_match_not_priority():
+    """同一组规则换成 优先级 策略, S2 不占任何列, 用例 T2 (酝酿中应不动) 就会被兜底 S4 改掉。"""
+    rs = load_rules(STATUS_YAML)
+    rs.hit_policy = "优先级"
+    outcomes = {o.name: o for o in run_tests(rs)}
+    t2 = next(o for name, o in outcomes.items() if name.startswith("T2"))
+    assert not t2.passed and t2.hit == "S2; S4" and t2.problems == ["状态-会议: 期望 空, 实际 01-新增"]
 
 
 def test_cli_run_and_test(tmp_path, capsys):

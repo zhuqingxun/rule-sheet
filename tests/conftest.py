@@ -3,9 +3,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "customer-sync"
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLE_DIR = EXAMPLES / "customer-sync"
 EXCEL_RULES = EXAMPLE_DIR / "规则_决策表.xlsx"
 YAML_RULES = EXAMPLE_DIR / "rules.yaml"
+STATUS_DIR = EXAMPLES / "status-machine"
+STATUS_EXCEL = STATUS_DIR / "规则_决策表.xlsx"
+STATUS_YAML = STATUS_DIR / "rules.yaml"
 
 
 @pytest.fixture

@@ -66,6 +66,61 @@ def test_yaml_minimal_document(tmp_path):
     assert mask.tolist() == [False, True]
 
 
+def test_yaml_hyphen_names_and_unspaced_subtraction(tmp_path):
+    """issue #1 的现场: 字段名含 -, 用例没给该变量时要被扫描到并置空, 而不是被截成 上期.类别 留下裸的 会议。
+    同时无空格的减法不能被扫描器整体当成一个变量名吞掉。"""
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "匹配: {左表别名: 本期, 右表别名: 上期}\n"
+        "变量:\n  差额: 本期.金额-上期.金额\n"
+        "规则:\n"
+        '  - 编号: S1\n    当:\n      - 上期.类别-会议 == "变动通报"\n    则:\n      状态-会议: 02-进展更新\n'
+        "  - 编号: S2\n    当:\n      - 差额 > 0\n    则:\n      备注: 涨了\n"
+        "测试:\n"
+        "  - 用例: 用例没给 上期.类别-会议, 视为空, 不命中\n"
+        "    输入: {本期.金额: 10, 上期.金额: 4}\n"
+        "    期望: {备注: 涨了}\n"
+        "  - 用例: 给了就命中\n"
+        "    输入: {上期.类别-会议: 变动通报, 本期.金额: 1, 上期.金额: 4}\n"
+        "    期望: {状态-会议: 02-进展更新}\n",
+        encoding="utf-8",
+    )
+    rs = load_yaml_rules(p)
+    assert rs.variables == ["上期.类别-会议", "上期.金额", "差额", "本期.金额"]
+    from rule_sheet.engine import run_tests
+
+    outcomes = run_tests(rs)
+    assert [(o.passed, o.hit, o.error) for o in outcomes] == [(True, "S2", ""), (True, "S1", "")]
+
+
+def test_yaml_rule_without_then_and_policy_validation(tmp_path):
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "命中策略: 首次命中\n规则:\n  - 编号: G\n    当:\n      - x > 1\n    则:\n  - 则: {y: 2}\n",
+        encoding="utf-8",
+    )
+    rs = load_yaml_rules(p)
+    assert rs.hit_policy == "首次命中"
+    assert rs.rules[0].outputs == {} and rs.rules[1].outputs == {"y": 2} and rs.outputs == ["y"]
+    p.write_text("命中策略: 首个\n规则: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="未知的命中策略「首个」.*首次命中"):
+        load_yaml_rules(p)
+
+
+def test_excel_policy_validation(tmp_path):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.active.title = "匹配设置"
+    ws = wb.create_sheet("决策表")
+    ws.append(["命中策略", "first"])
+    ws.append(["规则ID"])
+    ws.append(["规则ID"])
+    wb.save(tmp_path / "bad.xlsx")
+    with pytest.raises(ValueError, match="未知的命中策略「first」"):
+        load_rules(tmp_path / "bad.xlsx")
+
+
 def test_missing_file_and_missing_sheet(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_rules(tmp_path / "nope.xlsx")

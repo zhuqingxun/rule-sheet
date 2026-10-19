@@ -2,7 +2,7 @@
 
 - 单元格条件: FEEL 一元测试子集 (决策表前端)
 - 条件组合: 全部满足 / 任一满足 / 不满足 (YAML 前端)
-- 输出格: 不改 / 字面值 / 复制变量 / =表达式
+- 输出格: 不改 / 清空 / 字面值 / 复制变量 / =表达式
 
 空值约定: 空值参与任何比较都不成立 (SQL 风格); 判空必须显式写 `为空` / `非空`。
 """
@@ -18,7 +18,7 @@ from typing import Any
 import pandas as pd
 
 from .expressions import eval_expr, literal, split_top_level
-from .model import BLANK_WORDS, Condition, Namespace
+from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, Condition, Namespace
 
 Mask = pd.Series
 
@@ -98,10 +98,17 @@ def expr_condition(expr: str) -> Condition:
     return lambda ns: eval_expr(expr, ns)
 
 
+def ns_index(ns: Namespace) -> pd.Index:
+    """命名空间里第一列的行索引 (标量变量如 基准日期 没有索引, 跳过)。"""
+    for v in ns.values():
+        if isinstance(v, pd.Series):
+            return v.index
+    raise ValueError("命名空间里没有任何列变量, 无法确定行数")
+
+
 def to_mask(res: Any, ns: Namespace) -> Mask:
-    index = next(iter(ns.values())).index
     if not isinstance(res, pd.Series):
-        res = pd.Series(bool(res), index=index)
+        res = pd.Series(bool(res), index=ns_index(ns))
     return res.fillna(False).astype(bool)
 
 
@@ -160,13 +167,15 @@ def strings_in(node: Any) -> list[str]:
 
 
 def resolve_output(spec: Any, ns: Namespace) -> Any:
-    """解析输出格。返回 None 表示不改。"""
+    """解析输出格。返回 None 表示不改, CLEAR 表示把该列清空。"""
     if spec is None:
         return None
     if isinstance(spec, str):
         s = spec.strip()
         if s in BLANK_WORDS:
             return None
+        if s in CLEAR_WORDS:
+            return CLEAR
         if s.startswith("="):
             return eval_expr(s[1:], ns)
         if s in ns:

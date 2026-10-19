@@ -121,6 +121,53 @@ def test_output_kinds(ns_two_rows):
     assert res["e"].iloc[2] == 5100.0
 
 
+def test_clear_output_writes_null(ns_two_rows):
+    """输出格 清空 把目标列写成空值 (issue #2); - 仍是不改; 加引号的 "清空" 是普通文字。"""
+    r = Rule("R", 1, [cell_condition("本月.存在", "是")], {"a": "清空", "b": "置空", "c": "-", "d": '"清空"'})
+    rs = make_rs([r], ["a", "b", "c", "d"])
+    keep = {k: pd.Series(["keep"] * 3) for k in "abcd"}
+    res, _ = apply_rules(rs, ns_two_rows, keep)
+    assert res["a"].tolist() == [None, "keep", None]
+    assert res["b"].tolist() == [None, "keep", None]
+    assert res["c"].tolist() == ["keep"] * 3
+    assert res["d"].tolist() == ["清空", "keep", "清空"]
+
+
+def test_clear_takes_part_in_priority_merge(ns_two_rows):
+    # 清空 和普通输出一样参与逐列合并: 优先级数字小的 清空 赢过数字大的写值, 反过来也一样
+    r1 = Rule("R1", 1, [cell_condition("本月.存在", "是")], {"x": "清空"})
+    r2 = Rule("R2", 2, [cell_condition("本月.存在", "是")], {"x": "写了"})
+    res, _ = apply_rules(make_rs([r1, r2], ["x"]), ns_two_rows, {"x": pd.Series(["old"] * 3)})
+    assert res["x"].tolist() == [None, "old", None]
+    swapped = [Rule("R1", 2, r1.conditions, r1.outputs), Rule("R2", 1, r2.conditions, r2.outputs)]
+    res, _ = apply_rules(make_rs(swapped, ["x"]), ns_two_rows, {"x": pd.Series(["old"] * 3)})
+    assert res["x"].tolist() == ["写了", "old", "写了"]
+
+
+def test_first_match_policy_stops_at_first_hit(ns_two_rows):
+    """首次命中 (issue #3): 每行只听优先级数字最小的那条; 没有输出的规则也能拦住一行。"""
+    guard = Rule("G", 1, [cell_condition("主表.状态", "活跃")], {})  # 只拦截, 什么都不改
+    r2 = Rule("R2", 2, [cell_condition("本月.存在", "是")], {"x": "来自R2", "y": "来自R2"})
+    r3 = Rule("R3", 3, [], {"x": "兜底"})  # 无条件
+    originals = {"x": pd.Series(["old"] * 3), "y": pd.Series(["old"] * 3)}
+    res, hit = apply_rules(make_rs([r3, r2, guard], ["x", "y"], hit_policy="首次命中"), ns_two_rows, originals)
+    # 行 0: 活跃 -> G 拦住, 不改; 行 1: 休眠, 本月不存在 -> R3 兜底; 行 2: 状态空, 本月存在 -> R2
+    assert res["x"].tolist() == ["old", "兜底", "来自R2"]
+    assert res["y"].tolist() == ["old", "old", "来自R2"]
+    assert hit.tolist() == ["G", "R3", "R2"]  # 只记录赢的那条
+    # 同一组规则换成 优先级 策略: G 不占任何列, 行 0 的 x 被 R2 写、y 也被 R2 写
+    res, hit = apply_rules(make_rs([r3, r2, guard], ["x", "y"]), ns_two_rows, originals)
+    assert res["x"].tolist() == ["来自R2", "兜底", "来自R2"]
+    assert hit.tolist() == ["G; R2; R3", "R3", "R2; R3"]
+
+
+def test_first_match_ties_follow_definition_order(ns_two_rows):
+    a = Rule("A", 5, [], {"x": "A"})
+    b = Rule("B", 5, [], {"x": "B"})
+    res, hit = apply_rules(make_rs([b, a], ["x"], hit_policy="首次命中"), ns_two_rows, {})
+    assert res["x"].tolist() == ["B"] * 3 and hit.tolist() == ["B"] * 3
+
+
 def test_unique_policy_reports_label(ns_two_rows):
     r1 = Rule("R1", 1, [cell_condition("本月.存在", "是")], {"x": "1"})
     r2 = Rule("R2", 2, [expr_condition("主表.金额 > 100")], {"x": "2"})
@@ -168,3 +215,23 @@ def test_run_tests_blank_expected_means_unchanged_and_missing_vars_are_null():
     assert [o.passed for o in outcomes] == [True, True, False, True]
     assert outcomes[0].hit == "R1" and outcomes[1].hit == ""
     assert "备注" in outcomes[2].problems[0]
+
+
+def test_run_tests_expected_cleared():
+    """期望格写 清空 / 为空 = 期望该列为空值; 留空仍是「不变」, 所以能区分「被清空」和「没动」。"""
+    r1 = Rule("R1", 1, [cell_condition("主表.状态", "活跃")], {"备注": "清空"})
+    rs = make_rs(
+        [r1],
+        ["备注"],
+        tests=[
+            TestCase("清空成功", {"主表.状态": "活跃", "主表.备注": "旧"}, {"备注": "清空"}),
+            TestCase("也认 为空", {"主表.状态": "活跃", "主表.备注": "旧"}, {"备注": "为空"}),
+            TestCase("留空=不变, 抓到被清空", {"主表.状态": "活跃", "主表.备注": "旧"}, {"备注": None}),
+            TestCase("没命中, 期望空则失败", {"主表.状态": "休眠", "主表.备注": "旧"}, {"备注": "清空"}),
+        ],
+        variables=["主表.状态"],
+    )
+    outcomes = run_tests(rs)
+    assert [o.passed for o in outcomes] == [True, True, False, False]
+    assert outcomes[2].problems == ["备注: 期望 旧, 实际 空"]
+    assert outcomes[3].problems == ["备注: 期望 空, 实际 旧"]

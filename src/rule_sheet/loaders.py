@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +9,16 @@ import yaml
 from openpyxl import load_workbook
 
 from .conditions import build_condition, cell_condition, strings_in
-from .model import Rule, RuleSet, TestCase
+from .expressions import FUNCS, find_names
+from .model import BASE_DATE_VAR, HIT_POLICIES, Rule, RuleSet, TestCase
+
+
+def _check_policy(policy: Any) -> str:
+    name = str(policy or "优先级").strip()
+    if name not in HIT_POLICIES:
+        raise ValueError(f"未知的命中策略「{name}」, 只认: {' / '.join(HIT_POLICIES)}")
+    return name
+
 
 # ---------------------------------------------------------------------------
 # Excel 决策表
@@ -41,7 +49,10 @@ def _parse_header(grid: list[list[Any]]) -> tuple[list[tuple[int, str, str]], in
 
 
 def load_excel_rules(path: Path) -> RuleSet:
-    wb = load_workbook(path, data_only=True)
+    # data_only=False: 以 = 开头的格 (= 活跃 / =主表.金额 * 1.1) 在 Excel 里会被当成公式存起来,
+    # data_only=True 读到的是公式的缓存结果 (没算过是 None, 算过是 #NAME?), 条件就静默变成「不关心」。
+    # 这里按原文读, 规则工作簿里的 = 一律是 rule-sheet 表达式, 不支持写 Excel 公式。
+    wb = load_workbook(path, data_only=False)
     for sheet in ("匹配设置", "决策表"):
         if sheet not in wb.sheetnames:
             raise ValueError(f"规则文件缺少「{sheet}」sheet: {path.name}")
@@ -55,7 +66,7 @@ def load_excel_rules(path: Path) -> RuleSet:
         ]
 
     grid = _rows(wb["决策表"])
-    hit_policy = str(grid[0][1] or "优先级").strip()
+    hit_policy = _check_policy(grid[0][1])
     cols, body_start = _parse_header(grid)
     id_col = next(i for i, k, _ in cols if k == "规则ID")
     pri_col = next((i for i, k, _ in cols if k == "优先级"), None)
@@ -117,36 +128,38 @@ def load_yaml_rules(path: Path) -> RuleSet:
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     rules: list[Rule] = []
     outputs: list[str] = []
-    for order, r in enumerate(doc.get("规则", [])):
-        conds = r.get("当", [])
+    for order, r in enumerate(doc.get("规则") or []):
+        conds = r.get("当") or []
+        then = r.get("则") or {}  # 则: 省略或为空 = 命中但什么都不改 (首次命中 下用来拦截一行)
         rules.append(
             Rule(
                 rule_id=str(r.get("编号", f"R{order + 1}")),
                 priority=float(r.get("优先级", 1000 + order)),
                 conditions=[build_condition(conds)] if conds else [],
-                outputs=dict(r.get("则", {})),
+                outputs=dict(then),
                 desc=str(r.get("名称", "")),
             )
         )
-        for col in r.get("则", {}):
+        for col in then:
             if col not in outputs:
                 outputs.append(col)
     tests = [
-        TestCase(str(t.get("用例", f"T{i + 1}")), dict(t.get("输入", {})), dict(t.get("期望", {}) or {}))
-        for i, t in enumerate(doc.get("测试", []))
+        TestCase(str(t.get("用例", f"T{i + 1}")), dict(t.get("输入") or {}), dict(t.get("期望") or {}))
+        for i, t in enumerate(doc.get("测试") or [])
     ]
     derived = [(str(k), str(v)) for k, v in (doc.get("变量") or {}).items()]
-    match = dict(doc.get("匹配", {}))
-    la, ra = match.get("左表别名", "主表"), match.get("右表别名", "本月")
-    texts = [s for r in doc.get("规则", []) for s in strings_in(r.get("当"))]
-    texts += [str(v) for r in doc.get("规则", []) for v in (r.get("则") or {}).values()]
+    match = dict(doc.get("匹配") or {})
+    la, ra = str(match.get("左表别名", "主表")), str(match.get("右表别名", "本月"))
+    # 扫描 当 / 则 / 变量 里引用到的 <别名>.<列> 变量名; YAML 里新增写变量名的位置要同步加进 texts
+    texts = [s for r in doc.get("规则") or [] for s in strings_in(r.get("当"))]
+    texts += [str(v) for r in doc.get("规则") or [] for v in (r.get("则") or {}).values()]
     texts += [v for _, v in derived]
-    name_re = re.compile(rf"(?<![\w.])(?:{re.escape(str(la))}|{re.escape(str(ra))})\.\w+")
-    variables = sorted({m.group(0) for t in texts for m in name_re.finditer(t)} | {k for k, _ in derived})
+    known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
+    variables = sorted({n for t in texts for n in find_names(t, (la, ra), known)} | {k for k, _ in derived})
     return RuleSet(
         match,
         derived,
-        str(doc.get("命中策略", "优先级")),
+        _check_policy(doc.get("命中策略")),
         rules,
         outputs,
         tests,
