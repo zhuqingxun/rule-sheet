@@ -244,6 +244,31 @@ def test_excel_test_sheet_guards(tmp_path):
     assert [o.passed for o in run_tests(rs)] == [True, True]
 
 
+def test_excel_scans_variables_referenced_inside_cells(tmp_path):
+    """输入格右侧 (!= 上期.b / [0..主表.上限]) 和输出格 (=主表.c * 2 / 本月.d) 引用的变量不一定是表头输入列,
+    它们也要进 variables: 测试用例才能给值, 没给的才会置空而不是被当成字面文本比较。"""
+    from rule_sheet.engine import run_tests
+
+    p = make_workbook(
+        tmp_path / "r.xlsx",
+        [
+            ["规则ID", "输入", "输入", "输出", "输出"],
+            ["规则ID", "主表.a", "主表.n", "标记", "电话"],
+            ["R1", "!= 本月.b", "[0..主表.上限]", "=主表.c * 2", "本月.d"],
+        ],
+        [
+            ["用例", "输入", "输入", "输入", "输入", "输入", "输入", "期望", "期望"],
+            ["用例", "主表.a", "本月.b", "主表.n", "主表.上限", "主表.c", "本月.d", "标记", "电话"],
+            ["T1", "x", "y", 5, 10, 21, "139", 42, "139"],
+            ["T2", "x", "x", 5, 10, 21, "139", None, None],  # a == b 不命中
+            ["T3", "x", None, 5, 10, 21, "139", None, None],  # 本月.b 没给 = 空, != 不成立, 不能拿字面 "本月.b" 去比
+        ],
+    )
+    rs = load_rules(p)
+    assert rs.variables == ["主表.a", "主表.n", "主表.c", "主表.上限", "本月.b", "本月.d"]
+    assert [(o.passed, o.hit) for o in run_tests(rs)] == [(True, "R1"), (True, ""), (True, "")]
+
+
 def test_excel_continuation_rows_are_or_branches(tmp_path):
     """issue #8: 相邻的同 ID 行是同一条规则的「或」分支 (每行各格 AND), 规则 ID 可以合并单元格, 输出以首行为准。"""
     from rule_sheet.engine import apply_rules

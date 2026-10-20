@@ -46,6 +46,17 @@ def test_comparison_against_another_variable():
     assert hits("= 主表.电话", var, ns) == [False, True, False, False]
 
 
+def test_dangling_variable_name_is_an_error_not_text():
+    # 右侧长得像 <别名>.<列> 却不在命名空间里 (列名写错 / 表里没这列), 不能拿字面 "主表.电洁" 去比较然后静默不命中
+    ns = {"主表.电话": s("x", "b")}
+    with pytest.raises(KeyError, match="未定义的变量「主表.电洁」"):
+        hits("!= 主表.电洁", s("a", "b"), ns)
+    with pytest.raises(KeyError, match="未定义的变量「主表.上限」"):
+        hits("[0..主表.上限]", s(1, 2), ns)
+    assert hits("v1.2", s("v1.2", "v2"), ns) == [True, False]  # 没有叫 v1 的别名, 仍是普通文字
+    assert hits('"主表.电洁"', s("主表.电洁", "b"), ns) == [True, False]  # 加引号 = 明确要当文字
+
+
 def test_ranges_closed_and_open():
     var = s(0.02, 0.03, 0.05, 0.051, None)
     assert hits("[0.02..0.05]", var) == [True, True, True, False, False]

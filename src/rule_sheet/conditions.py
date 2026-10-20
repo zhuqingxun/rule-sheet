@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from .expressions import eval_expr, literal, split_top_level, truth
+from .expressions import dangling_name, eval_expr, literal, split_top_level, truth, undefined_variable
 from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, Condition, Namespace
 
 Mask = pd.Series
@@ -183,5 +183,7 @@ def resolve_output(spec: Any, ns: Namespace) -> Any:
             return ns[s]
         if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
             return s[1:-1]
+        if dangling_name(s, ns):  # 想复制 本月.电话 却写错了列名, 不能把 "本月.电话" 当文字写进去
+            raise undefined_variable(s)
         return s
     return spec

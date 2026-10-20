@@ -121,6 +121,16 @@ def test_output_kinds(ns_two_rows):
     assert res["e"].iloc[2] == 5100.0
 
 
+def test_output_dangling_variable_is_an_error(ns_two_rows):
+    # 想复制 本月.电话 却写成 本月.电洁: 不能把字面 "本月.电洁" 写进结果; 报错带规则 ID 和输出列
+    r = Rule("R7", 1, [cell_condition("本月.存在", "是")], {"电话": "本月.电洁", "备注": '"本月.电洁"'})
+    with pytest.raises(KeyError, match="规则 R7 输出「电话」: 规则引用了未定义的变量「本月.电洁」"):
+        apply_rules(make_rs([r], ["电话", "备注"]), ns_two_rows, {})
+    r.outputs = {"备注": '"本月.电洁"'}  # 加引号 = 明确要当文字
+    res, _ = apply_rules(make_rs([r], ["备注"]), ns_two_rows, {})
+    assert res["备注"].iloc[0] == "本月.电洁"
+
+
 def test_clear_output_writes_null(ns_two_rows):
     """输出格 清空 把目标列写成空值 (issue #2); - 仍是不改; 加引号的 "清空" 是普通文字。"""
     r = Rule("R", 1, [cell_condition("本月.存在", "是")], {"a": "清空", "b": "置空", "c": "-", "d": '"清空"'})

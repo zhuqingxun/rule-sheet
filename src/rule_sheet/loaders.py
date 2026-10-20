@@ -177,6 +177,7 @@ def load_excel_rules(path: Path) -> RuleSet:
     branches: list[list[list[Condition]]] = []
     first_row: list[int] = []
     seen: dict[str, int] = {}
+    cell_texts: list[str] = []  # 输入格 / 输出格原文, 之后扫描里面引用的变量 (!= 上期.x / =主表.y * 2 / 本月.z)
     for offset, row in enumerate(grid[body_start:]):
         excel_row = body_start + offset + 1
         rid = _text(_at(row, id_col))
@@ -185,6 +186,9 @@ def load_excel_rules(path: Path) -> RuleSet:
         pri_raw = _at(row, pri_col)
         outs = {name: _at(row, i) for i, name in outputs}
         conds = [cell_condition(name, _at(row, i)) for i, name in inputs]
+        cells = [_at(row, i) for i, _ in inputs] + list(outs.values())
+        # 区间 [0..主表.上限] 里变量紧跟在 .. 后面, 扫描器的名字边界不认 . 前缀, 先把 .. 隔开
+        cell_texts.extend(v.replace("..", " .. ") for v in cells if isinstance(v, str))
         if rules and rid == rules[-1].rule_id:
             rule = rules[-1]
             where = f"规则 {rid} 的续行 (第 {excel_row} 行)"
@@ -223,8 +227,9 @@ def load_excel_rules(path: Path) -> RuleSet:
 
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
     input_names = [n for _, n in inputs]
-    extra = sorted({n for _, e in derived for n in find_names(e, (la, ra), known)} - set(input_names))
-    variables = input_names + extra  # 表头输入列 + 派生变量表达式里引用的列, 用例没给的都视为空
+    texts = cell_texts + [e for _, e in derived]
+    extra = sorted({n for t in texts for n in find_names(t, (la, ra), known)} - set(input_names))
+    variables = input_names + extra  # 表头输入列 + 单元格与派生变量表达式里引用的列, 用例没给的都视为空
     output_names = [n for _, n in outputs]
 
     tests: list[TestCase] = []

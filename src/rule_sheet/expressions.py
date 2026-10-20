@@ -50,6 +50,8 @@ def truth(x: Any) -> Any:
         if x.dtype == bool:
             return x
         present = x.notna()
+        if not x.index.is_unique:  # 引擎里索引总是唯一的 (RangeIndex); Python API 自带的 ns 可能不是, reindex 会抛
+            return present & x.map(lambda v: not is_na(v) and bool(v))
         return x[present].astype(bool).reindex(x.index, fill_value=False)
     return False if is_na(x) else bool(x)
 
@@ -326,6 +328,21 @@ def find_names(text: str, aliases: Iterable[str], known: Iterable[str] = ()) -> 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def dangling_name(token: str, ns: Namespace) -> bool:
+    """长得像变量名 (<已知别名>.<列>) 却不在命名空间里: 多半是列名写错或表里没这一列。
+
+    单元格 / 输出格里这种 token 不能当成字面文本静默参与比较或写出。
+    """
+    if "." not in token or token in ns:
+        return False
+    prefix = token.split(".", 1)[0] + "."
+    return any(k.startswith(prefix) for k in ns)
+
+
+def undefined_variable(token: str) -> KeyError:
+    return KeyError(f"规则引用了未定义的变量「{token}」(两表列名和变量定义里都没有它; 想当成文字用请加引号)")
+
+
 def split_top_level(s: str, sep: str = ",") -> list[str]:
     """按分隔符切分, 但跳过引号内和括号内的分隔符。"""
     parts: list[str] = []
@@ -377,4 +394,6 @@ def literal(token: str, ns: Namespace, var: pd.Series | None = None) -> Any:
         pass
     if _DATE_RE.match(t):
         return pd.Timestamp(t)
+    if dangling_name(t, ns):
+        raise undefined_variable(t)
     return t

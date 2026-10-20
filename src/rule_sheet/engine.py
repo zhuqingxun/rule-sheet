@@ -150,7 +150,10 @@ def apply_rules(
             cur = pd.Series([None] * len(index), index=index, dtype=object)
         cur = cur.astype(object)
         for rule in reversed(ordered):  # 优先级数字大的先写, 小的最后写并覆盖
-            val = resolve_output(rule.outputs.get(col), ns)
+            try:
+                val = resolve_output(rule.outputs.get(col), ns)
+            except KeyError as exc:
+                raise KeyError(f"规则 {rule.rule_id} 输出「{col}」: {exc.args[0]}") from exc
             if val is None:
                 continue
             if val is CLEAR:

@@ -138,6 +138,12 @@ def test_cli_run_and_test(tmp_path, capsys):
     no_tests.write_text("规则:\n  - 则: {y: 1}\n", encoding="utf-8")
     assert cli.main(["test", str(no_tests)]) == 1  # 没有用例 = 什么都没验证, 不能算通过
     assert "没有测试用例" in capsys.readouterr().out
+    no_tests.write_text(
+        "匹配: {左表: 客户主表.xlsx, 右表: 本月流水.xlsx, 匹配键: 客户编号}\n规则:\n  - 则: {提醒: 看一眼}\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["run", str(no_tests), "--base-dir", str(YAML_RULES.parent), "--dry-run"]) == 0
+    assert "提示: 规则文件没有内嵌测试用例" in capsys.readouterr().out  # run 不拦, 但要说一声
     assert cli.main([str(EXCEL_RULES), "--output", str(tmp_path / "o.xlsx")]) == 0  # 省略 run 子命令
     out = capsys.readouterr().out
     assert "5 行发生变更" in out and "已写出" in out
