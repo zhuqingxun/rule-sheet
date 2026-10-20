@@ -19,12 +19,15 @@ def test_excel_structure():
     assert len(rs.tests) == 8 and rs.tests[0].name == "T1"
     # 表头输入列在前, 之后是派生变量表达式里引用到的列 (用例没给时置空, 派生变量才能算出来)
     assert rs.variables == [
-        "主表.状态", "主表.等级", "偏差率", "本月.存在", "距上次活跃天数", "本月.电话", "主表.电话",
-        "主表.上次活跃", "主表.金额", "本月.金额",
+        "客户.状态", "客户.等级", "偏差率", "本月.存在", "距上次活跃天数", "本月.电话", "客户.电话",
+        "客户.上次活跃", "客户.金额", "本月.金额",
     ]  # fmt: skip
     assert [d for d, _ in rs.derived] == ["偏差率", "距上次活跃天数"]
-    assert isinstance(rs.match["基准日期"], (date, datetime))
-    assert rs.match["匹配键"] == "客户编号"
+    assert isinstance(rs.settings["基准日期"], (date, datetime))
+    assert [(s.name, s.primary, s.keys, s.path) for s in rs.inputs] == [
+        ("客户", True, [], "客户主表.xlsx"),
+        ("本月", False, [("客户编号", "客户编号")], "本月流水.xlsx"),
+    ]
 
 
 def test_yaml_structure_and_variable_scan():
@@ -33,7 +36,7 @@ def test_yaml_structure_and_variable_scan():
     assert rs.outputs == ["复核标记", "备注", "状态", "电话", "提醒"]
     assert len(rs.tests) == 8
     # 嵌套在 任一满足 里的变量也要被扫到, 测试用例没给时才会被置空而不是报未定义
-    assert {"本月.电话", "主表.电话", "本月.存在", "偏差率", "距上次活跃天数"} <= set(rs.variables)
+    assert {"本月.电话", "客户.电话", "本月.存在", "偏差率", "距上次活跃天数"} <= set(rs.variables)
 
 
 def test_nested_combinators_evaluate(ns_two_rows):
@@ -132,28 +135,27 @@ def test_yaml_rule_without_then_and_policy_validation(tmp_path):
 
 
 def test_excel_policy_validation(tmp_path):
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    wb.active.title = "匹配设置"
-    ws = wb.create_sheet("决策表")
-    ws.append(["命中策略", "first"])
-    ws.append(["规则ID"])
-    ws.append(["规则ID"])
-    wb.save(tmp_path / "bad.xlsx")
     with pytest.raises(ValueError, match="未知的命中策略「first」"):
-        load_rules(tmp_path / "bad.xlsx")
+        load_rules(make_workbook(tmp_path / "bad.xlsx", [["命中策略", "first"], ["规则ID"], ["规则ID"]]))
 
 
-def make_workbook(path, decision, tests=None, derived=None, merges=()):
-    """最小规则工作簿: decision / tests 是整张 sheet 的行 (含表头), merges 是决策表里要合并的区域。"""
+INPUTS = [["名称", "匹配", "文件"], ["主表", "主表", "a.xlsx"], ["本月", "k", "b.xlsx"]]
+
+
+def make_workbook(path, decision, tests=None, derived=None, merges=(), inputs=None, settings=None):
+    """最小规则工作簿: decision / tests / inputs 是整张 sheet 的行 (含表头), merges 是决策表里要合并的区域。"""
     from openpyxl import Workbook
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "匹配设置"
-    for row in (["设置项", "值"], ["左表", "a.xlsx"], ["右表", "b.xlsx"], ["匹配键", "k"]):
+    ws.title = "输入"
+    for row in inputs or INPUTS:
         ws.append(row)
+    if settings:
+        ws = wb.create_sheet("设置")
+        ws.append(["设置项", "值"])
+        for row in settings:
+            ws.append(row)
     if derived:
         ws = wb.create_sheet("变量定义")
         ws.append(["变量", "定义"])
@@ -316,13 +318,128 @@ def test_yaml_duplicate_id_and_test_guards(tmp_path):
         load_yaml_rules(p)
 
 
+# ---------------------------------------------------------------------------
+# 输入声明: 规则文件是形参 (名字 + 怎么对齐到主表), 文件只是可选的默认绑定
+# ---------------------------------------------------------------------------
+
+RULE = [*HEADER, ["R1", 1, "x", "-", "命中"]]
+
+
+def test_excel_inputs_sheet(tmp_path):
+    rows = [
+        ["说明", "名称", "文件", "匹配", "重复键"],  # 列顺序随意, 多余的列忽略
+        ["被更新的表", "主表", "a.xlsx", "主表", None],
+        ["参照", "本月", None, "k", "报错"],
+        ["另一张", "花名册", "c.xlsx#人员", "工号 = 主表.拟任人工号, 年月", None],
+    ]
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=rows, settings=[["基准日期", "2026-10-19"]]))
+    assert [(s.name, s.primary, s.keys, s.dup_policy, s.path) for s in rs.inputs] == [
+        ("主表", True, [], "取第一条", "a.xlsx"),
+        ("本月", False, [("k", "k")], "报错", None),
+        ("花名册", False, [("工号", "拟任人工号"), ("年月", "年月")], "取第一条", "c.xlsx#人员"),
+    ]
+    assert rs.names == ["主表", "本月", "花名册"] and rs.settings == {"基准日期": "2026-10-19"}
+
+
+def test_single_input_may_omit_primary_word(tmp_path):
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=[["名称", "匹配"], ["主表", None]]))
+    assert rs.primary.name == "主表" and rs.lookups == []
+
+
+@pytest.mark.parametrize(
+    ("inputs", "msg"),
+    [
+        ([["名称", "匹配"], ["主表", None], ["本月", "k"]], "必须恰有一个输入的「匹配」写 主表 .* 现在有 0 个"),
+        ([["名称", "匹配"], ["主表", "主表"], ["本月", "主表"]], "现在有 2 个 \\(主表, 本月\\)"),
+        ([["名称", "匹配"], ["主表", "主表"], ["本月", None]], "输入「本月」没有写「匹配」"),
+        ([["名称", "匹配"], ["主表", "主表"], ["主表", "k"]], "输入名「主表」重复"),
+        ([["名称", "匹配", "重复键"], ["主表", "主表", None], ["本月", "k", "去重"]], "「重复键」只认 取第一条 / 报错"),
+        ([["名称", "匹配"], ["主表", "主表"], ["本月", "k"], ["花名册", "工号 = 本月.工号"]], "只能对齐到主表「主表」"),
+        ([["名字", "匹配"], ["主表", "主表"]], "第 1 行缺少「名称」列"),
+        ([["名称", "匹配"]], "没有声明任何输入"),
+    ],
+)
+def test_excel_inputs_errors(tmp_path, inputs, msg):
+    with pytest.raises(ValueError, match=msg):
+        load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=inputs))
+
+
+def test_settings_sheet_rejects_unknown_keys(tmp_path):
+    with pytest.raises(ValueError, match="设置项「輸出」不认识"):
+        load_rules(make_workbook(tmp_path / "r.xlsx", RULE, settings=[["輸出", "x.xlsx"]]))
+
+
+def test_legacy_match_sheet_is_converted(tmp_path):
+    """0.4 以前的「匹配设置」sheet (左表 / 右表 / 别名 / 匹配键 / 右表重复键) 折算成输入声明, 老文件不用改。"""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "匹配设置"
+    for row in (
+        ["设置项", "值"],
+        ["左表", "a.xlsx"],
+        ["右表", "b.xlsx"],
+        ["左表别名", "本期"],
+        ["右表别名", "上期"],
+        ["匹配键", "岗位编码, 年月"],
+        ["右表重复键", "报错"],
+        ["基准日期", "2026-10-19"],
+        ["输出", "out.xlsx"],
+    ):
+        ws.append(row)
+    ws = wb.create_sheet("决策表")
+    for row in [["规则ID", "输入", "输出"], ["规则ID", "本期.a", "标记"], ["R1", "x", "y"]]:
+        ws.append(row)
+    wb.save(tmp_path / "old.xlsx")
+    rs = load_rules(tmp_path / "old.xlsx")
+    assert [(s.name, s.primary, s.keys, s.dup_policy, s.path) for s in rs.inputs] == [
+        ("本期", True, [], "取第一条", "a.xlsx"),
+        ("上期", False, [("岗位编码", "岗位编码"), ("年月", "年月")], "报错", "b.xlsx"),
+    ]
+    assert rs.settings == {"基准日期": "2026-10-19", "输出": "out.xlsx"}
+
+
+def test_yaml_inputs_and_settings(tmp_path):
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "输入:\n"
+        "  本期: {文件: a.xlsx, 匹配: 主表}\n"
+        "  上期: {文件: b.xlsx, 匹配: 岗位编码, 重复键: 报错}\n"
+        "  花名册: {匹配: 工号 = 本期.拟任人工号}\n"
+        "设置: {输出: out.xlsx}\n"
+        "规则:\n  - 当: [本期.x > 1]\n    则: {y: 2}\n",
+        encoding="utf-8",
+    )
+    rs = load_yaml_rules(p)
+    assert [(s.name, s.primary, s.keys, s.dup_policy, s.path) for s in rs.inputs] == [
+        ("本期", True, [], "取第一条", "a.xlsx"),
+        ("上期", False, [("岗位编码", "岗位编码")], "报错", "b.xlsx"),
+        ("花名册", False, [("工号", "拟任人工号")], "取第一条", None),
+    ]
+    assert rs.settings == {"输出": "out.xlsx"} and rs.variables == ["本期.x"]
+    p.write_text("输入:\n  本期: a.xlsx\n规则: []\n", encoding="utf-8")  # 单输入: 只写文件名即可
+    assert load_yaml_rules(p).primary.name == "本期"
+    p.write_text("输入: {本期: {文件: a.xlsx, 匹配: 主表}}\n匹配: {左表: a.xlsx}\n规则: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="不能同时出现"):
+        load_yaml_rules(p)
+    p.write_text("输入: {本期: {档案: a.xlsx}}\n规则: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="「档案」不认识"):
+        load_yaml_rules(p)
+
+
 def test_missing_file_and_missing_sheet(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_rules(tmp_path / "nope.xlsx")
     from openpyxl import Workbook
 
     wb = Workbook()
-    wb.active.title = "随便"
+    wb.active.title = "决策表"
     wb.save(tmp_path / "bad.xlsx")
-    with pytest.raises(ValueError, match="匹配设置"):
+    with pytest.raises(ValueError, match="缺少「输入」sheet"):
         load_rules(tmp_path / "bad.xlsx")
+    wb = Workbook()
+    wb.active.title = "随便"
+    wb.save(tmp_path / "bad2.xlsx")
+    with pytest.raises(ValueError, match="缺少「决策表」sheet"):
+        load_rules(tmp_path / "bad2.xlsx")

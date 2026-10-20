@@ -5,8 +5,8 @@ import pytest
 from openpyxl import Workbook
 
 from rule_sheet.conditions import cell_condition, expr_condition
-from rule_sheet.engine import add_derived, apply_rules, build_namespace, read_table, run_tests
-from rule_sheet.model import Rule, RuleSet, TestCase
+from rule_sheet.engine import add_derived, apply_rules, build_namespace, read_table, run_tests, split_sheet
+from rule_sheet.model import InputSpec, Rule, RuleSet, TestCase
 
 # ---------------------------------------------------------------------------
 # read_table
@@ -32,9 +32,19 @@ def test_read_table_keeps_text_cells_as_text(tmp_path):
     assert pd.api.types.is_datetime64_any_dtype(df["日期"])
 
 
+def inputs_of(*specs: tuple):
+    """(名称, 匹配键列表 | None) ...; 第一个是主表。键写成 "本输入的列=主表的列" 或 "同名列"。"""
+    out = []
+    for i, (name, keys) in enumerate(specs):
+        pairs = [tuple(k.split("=")) if "=" in k else (k, k) for k in (keys or [])]
+        out.append(InputSpec(name, primary=(i == 0), keys=pairs))
+    return out
+
+
 def make_rs(rules, outputs, hit_policy="优先级", **kw):
     return RuleSet(
-        match=kw.pop("match", {}),
+        inputs=kw.pop("inputs", inputs_of(("主表", None), ("本月", ["编号"]))),
+        settings=kw.pop("settings", {}),
         derived=kw.pop("derived", []),
         hit_policy=hit_policy,
         rules=rules,
@@ -51,36 +61,75 @@ def make_rs(rules, outputs, hit_policy="优先级", **kw):
 def test_namespace_prefixes_exist_flag_and_collision():
     left = pd.DataFrame({"编号": ["A", "B", "C"], "金额": [1, 2, 3], "备注": ["x", "y", "z"]})
     right = pd.DataFrame({"编号": ["A", "C"], "金额": [10, 30], "电话": ["t1", None]})
-    rs = make_rs([], [], match={"基准日期": "2026-10-19"})
-    ns = build_namespace(rs, left, right, ["编号"])
+    rs = make_rs([], [], settings={"基准日期": "2026-10-19"})
+    ns = build_namespace(rs, {"主表": left, "本月": right})
     assert ns["主表.金额"].tolist() == [1, 2, 3]
     assert ns["本月.金额"].tolist()[0] == 10 and pd.isna(ns["本月.金额"].iloc[1])
     assert ns["本月.存在"].tolist() == [True, False, True]
-    assert "本月.编号" not in ns  # 匹配键只保留左侧
+    assert "本月.编号" not in ns  # 参照表的匹配键列不暴露, 值就是主表的
     assert ns["基准日期"] == pd.Timestamp("2026-10-19")
 
 
-def test_namespace_aliases_from_match():
-    left = pd.DataFrame({"k": [1]})
-    right = pd.DataFrame({"k": [1], "v": [2]})
-    rs = make_rs([], [], match={"左表别名": "L", "右表别名": "R"})
-    ns = build_namespace(rs, left, right, ["k"])
-    assert set(ns) >= {"L.k", "R.v", "R.存在", "基准日期"}
+def test_namespace_three_inputs_with_own_keys_and_same_named_columns():
+    """N 个参照表各自按自己的键对齐到主表; 参照表之间同名列 (姓名) 互不干扰; 键名可以不同 (工号 = 主表.拟任人工号)。"""
+    base = pd.DataFrame({"岗位": ["P1", "P2", "P3"], "拟任人工号": ["E1", "E2", None], "姓名": ["a", "b", "c"]})
+    last = pd.DataFrame({"岗位": ["P1", "P3"], "姓名": ["a0", "c0"], "状态": ["新增", "进展"]})
+    roster = pd.DataFrame({"工号": ["E1", "E2"], "姓名": ["张三", "李四"], "部门": ["财务", "人事"]})
+    rs = make_rs([], [], inputs=inputs_of(("本期", None), ("上期", ["岗位"]), ("花名册", ["工号=拟任人工号"])))
+    ns = build_namespace(rs, {"本期": base, "上期": last, "花名册": roster})
+    assert ns["本期.姓名"].tolist() == ["a", "b", "c"]
+    assert ns["上期.姓名"].tolist()[0] == "a0" and pd.isna(ns["上期.姓名"].iloc[1])
+    assert ns["花名册.姓名"].tolist()[:2] == ["张三", "李四"] and pd.isna(ns["花名册.姓名"].iloc[2])
+    assert ns["上期.存在"].tolist() == [True, False, True]
+    assert ns["花名册.存在"].tolist() == [True, True, False]  # 主表键为空的行匹配不到
+    assert "花名册.工号" not in ns and "上期.岗位" not in ns
 
 
-def test_duplicate_right_keys_policy():
-    left = pd.DataFrame({"k": [1]})
-    right = pd.DataFrame({"k": [1, 1], "v": ["first", "second"]})
+def test_namespace_single_input_needs_no_join():
+    base = pd.DataFrame({"k": [1, 2], "v": ["a", "b"]})
+    ns = build_namespace(make_rs([], [], inputs=inputs_of(("表", None))), {"表": base})
+    assert set(ns) == {"表.k", "表.v", "基准日期"}
+
+
+def test_lookup_rows_with_null_keys_never_match():
+    # pandas merge 会把两边的 NaN 键配成一对, 参照表里键为空的行必须先剔掉, 否则 存在 会假阳性
+    base = pd.DataFrame({"k": [1, None], "v": ["a", "b"]})
+    lookup = pd.DataFrame({"k": [1, None], "w": ["x", "y"]})
+    ns = build_namespace(
+        make_rs([], [], inputs=inputs_of(("主表", None), ("本月", ["k"]))), {"主表": base, "本月": lookup}
+    )
+    assert ns["本月.存在"].tolist() == [True, False]
+    assert ns["本月.w"].tolist()[0] == "x" and pd.isna(ns["本月.w"].iloc[1])
+
+
+def test_duplicate_lookup_keys_policy():
+    left = pd.DataFrame({"编号": [1]})
+    right = pd.DataFrame({"编号": [1, 1], "v": ["first", "second"]})
     notes: list[str] = []
-    ns = build_namespace(make_rs([], []), left, right, ["k"], notes)
+    ns = build_namespace(make_rs([], []), {"主表": left, "本月": right}, notes)
     assert ns["本月.v"].tolist() == ["first"] and notes
-    with pytest.raises(ValueError, match="重复键"):
-        build_namespace(make_rs([], [], match={"右表重复键": "报错"}), left, right, ["k"])
+    strict = make_rs([], [])
+    strict.lookups[0].dup_policy = "报错"
+    with pytest.raises(ValueError, match="输入「本月」有 1 行重复键"):
+        build_namespace(strict, {"主表": left, "本月": right})
 
 
 def test_missing_key_column():
-    with pytest.raises(ValueError, match="匹配键"):
-        build_namespace(make_rs([], []), pd.DataFrame({"a": [1]}), pd.DataFrame({"b": [1]}), ["a"])
+    with pytest.raises(ValueError, match="主表「主表」没有列「编号」"):
+        build_namespace(make_rs([], []), {"主表": pd.DataFrame({"a": [1]}), "本月": pd.DataFrame({"编号": [1]})})
+    with pytest.raises(ValueError, match="输入「本月」没有匹配键列「编号」"):
+        build_namespace(make_rs([], []), {"主表": pd.DataFrame({"编号": [1]}), "本月": pd.DataFrame({"b": [1]})})
+
+
+def test_split_sheet(tmp_path):
+    plain = tmp_path / "a.xlsx"
+    plain.write_bytes(b"")
+    hashed = tmp_path / "报表#1.xlsx"
+    hashed.write_bytes(b"")
+    assert split_sheet(str(plain)) == (plain, None)
+    assert split_sheet(f"{plain}#明细") == (plain, "明细")
+    assert split_sheet(str(hashed)) == (hashed, None)  # 文件名本身含 #, 整个字符串是存在的文件就不拆
+    assert split_sheet("a.xlsx#s", tmp_path) == (plain, "s")  # 相对路径按 base_dir 解析
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""执行核心: 合并两表 -> 派生变量 -> 逐条规则求 mask -> 按命中策略合并输出 -> 审计列。"""
+"""执行核心: 读入各输入表 -> 以主表为锚逐个合并参照表 -> 派生变量 -> 逐条规则求 mask -> 按命中策略合并 -> 审计列。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from .conditions import ns_index, resolve_output, to_mask
@@ -34,53 +35,79 @@ Mask = pd.Series
 # ---------------------------------------------------------------------------
 
 
-def read_table(path: str | Path) -> pd.DataFrame:
+def resolve_path(p: str | Path, base_dir: Path | None) -> Path:
+    path = Path(str(p))
+    return path if path.is_absolute() or base_dir is None else base_dir / path
+
+
+def split_sheet(spec: str | Path, base_dir: Path | None = None) -> tuple[Path, str | None]:
+    """`路径#sheet名` 拆成 (路径, sheet名)。文件名本身也可以含 #: 整个字符串就是一个存在的文件时不拆。"""
+    text = str(spec)
+    whole = resolve_path(text, base_dir)
+    if whole.exists() or "#" not in text:
+        return whole, None
+    base, sheet = text.rsplit("#", 1)
+    return resolve_path(base, base_dir), sheet or None
+
+
+def read_table(path: str | Path, sheet: str | None = None) -> pd.DataFrame:
     """读 Excel, 保住文本格式的数字串。
 
     pandas 3 的 read_excel 默认会把文本单元格里的 "007" / "13800000001" 转成数字 (前导零丢失, 电话变浮点)。
     先按 object 原样读, 再让 pandas 只对整列同类型的数据做推断: 数值列、日期列正常, 文本列保持文本。
     """
-    return pd.read_excel(path, dtype=object).infer_objects()
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"数据表不存在: {p}")
+    if sheet is not None:
+        wb = load_workbook(p, read_only=True)
+        names = wb.sheetnames
+        wb.close()
+        if sheet not in names:
+            raise ValueError(f"数据表 {p.name} 里没有 sheet「{sheet}」, 有: {', '.join(names)}")
+    return pd.read_excel(p, sheet_name=sheet if sheet is not None else 0, dtype=object).infer_objects()
 
 
 # ---------------------------------------------------------------------------
-# 命名空间: 把两张表合并成 <左别名>.* / <右别名>.* 变量
+# 命名空间: 以主表为锚, 把每个参照表按各自的匹配键合并进来, 变量名 <输入名>.<列>
 # ---------------------------------------------------------------------------
 
 
-def build_namespace(
-    rs: RuleSet,
-    left: pd.DataFrame,
-    right: pd.DataFrame,
-    keys: list[str],
-    notes: list[str] | None = None,
-) -> Namespace:
-    for k in keys:
-        if k not in left.columns or k not in right.columns:
-            raise ValueError(f"匹配键「{k}」必须同时存在于左右两表")
-    dup = right.duplicated(subset=keys, keep="first")
-    if dup.any():
-        policy = str(rs.match.get("右表重复键", "取第一条"))
-        if policy != "取第一条":
-            raise ValueError(f"右表有 {int(dup.sum())} 行重复键, 而「右表重复键」设置为 {policy}")
-        if notes is not None:
-            notes.append(f"右表有 {int(dup.sum())} 行重复键, 按「取第一条」处理")
-        right = right[~dup]
-
-    merged = left.merge(right, on=keys, how="left", suffixes=("", "__r"), indicator=True)
-    merged.index = left.index
-    la, ra = rs.left_alias, rs.right_alias
-    ns: Namespace = {}
-    for col in left.columns:
-        ns[f"{la}.{col}"] = merged[col]
-    for col in right.columns:
-        if col in keys:
-            continue
-        src = f"{col}__r" if f"{col}__r" in merged.columns else col
-        ns[f"{ra}.{col}"] = merged[src]
-    ns[f"{ra}.{EXIST_VAR}"] = merged["_merge"].eq("both")
-    base = rs.match.get(BASE_DATE_VAR)
-    ns[BASE_DATE_VAR] = pd.Timestamp(base) if base else pd.Timestamp(date.today())
+def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[str] | None = None) -> Namespace:
+    primary = rs.primary
+    base = tables[primary.name]
+    ns: Namespace = {f"{primary.name}.{col}": base[col] for col in base.columns}
+    for spec in rs.lookups:
+        df = tables[spec.name]
+        if not spec.keys:
+            raise ValueError(f"输入「{spec.name}」没有匹配键, 不知道怎么对齐到主表「{primary.name}」")
+        mine = [m for m, _ in spec.keys]
+        theirs = [t for _, t in spec.keys]
+        for c in theirs:
+            if c not in base.columns:
+                raise ValueError(f"主表「{primary.name}」没有列「{c}」, 而输入「{spec.name}」要按它对齐")
+        for c in mine:
+            if c not in df.columns:
+                raise ValueError(f"输入「{spec.name}」没有匹配键列「{c}」")
+        df = df[df[mine].notna().all(axis=1)]  # 键为空的行不参与匹配: pandas merge 会把两边的 NaN 配成一对
+        dup = df.duplicated(subset=mine, keep="first")
+        if dup.any():
+            if spec.dup_policy != "取第一条":
+                raise ValueError(
+                    f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 而它的「重复键」设置为 {spec.dup_policy}"
+                )
+            if notes is not None:
+                notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「取第一条」处理")
+            df = df[~dup]
+        # 左侧只带主表的键列, 参照表之间同名列互不干扰; 参照表里与主表键列同名的非键列保留参照表的 (主表的加后缀)
+        merged = base[theirs].merge(df, left_on=theirs, right_on=mine, how="left", suffixes=("__p", ""), indicator=True)
+        merged.index = base.index
+        for col in df.columns:
+            if col not in mine:
+                ns[f"{spec.name}.{col}"] = merged[col]
+        ns[f"{spec.name}.{EXIST_VAR}"] = merged["_merge"].eq("both")
+    base_date = rs.settings.get(BASE_DATE_VAR)
+    ns[BASE_DATE_VAR] = pd.Timestamp(base_date) if base_date else pd.Timestamp(date.today())
     return ns
 
 
@@ -230,14 +257,14 @@ class TestOutcome:
 
 
 def run_tests(rs: RuleSet) -> list[TestOutcome]:
-    exist_var = f"{rs.right_alias}.{EXIST_VAR}"
-    outcomes: list[TestOutcome] = []
+    exist_vars = {f"{s.name}.{EXIST_VAR}" for s in rs.lookups}
     derived_names = {d for d, _ in rs.derived}
+    outcomes: list[TestOutcome] = []
     for tc in rs.tests:
         index = pd.RangeIndex(1)
         ns: Namespace = {}
         for name, val in tc.inputs.items():
-            if name == exist_var and isinstance(val, str):
+            if name in exist_vars and isinstance(val, str):
                 val = val.strip() in TRUE_WORDS
             if isinstance(val, str) and val.strip() in ("", NULL_WORD):  # 留空或写 空 = 空值
                 val = None
@@ -245,13 +272,13 @@ def run_tests(rs: RuleSet) -> list[TestOutcome]:
                 continue  # 派生变量留空 = 没给, 按表达式推导 (Excel 测试 sheet 每列每行都在, 留空不能算「给了空值」)
             dtype = object if isinstance(val, str) or val is None else None
             ns[name] = pd.Series([val], index=index, dtype=dtype)
-        ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.match.get(BASE_DATE_VAR) or date.today()))
+        ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.settings.get(BASE_DATE_VAR) or date.today()))
         for name in rs.variables:  # 用例没提到的变量 = 空值
             if name not in ns and name not in derived_names:
                 ns[name] = pd.Series([None], index=index, dtype=object)
         add_derived(rs, ns, index, lenient=True)
         originals = {
-            col: ns.get(f"{rs.left_alias}.{col}", pd.Series([None], index=index, dtype=object)) for col in rs.outputs
+            col: ns.get(f"{rs.primary.name}.{col}", pd.Series([None], index=index, dtype=object)) for col in rs.outputs
         }
         try:
             results, hit_ids = apply_rules(rs, ns, originals)
@@ -265,7 +292,7 @@ def run_tests(rs: RuleSet) -> list[TestOutcome]:
             if exp is None or (isinstance(exp, str) and exp.strip() == ""):
                 want = originals[col].iloc[0]  # 期望留空 = 该列不变
             elif isinstance(exp, str) and exp.strip() in EXPECT_NULL_WORDS:
-                want = None  # 期望写 清空 / 为空 = 该列应为空值
+                want = None  # 期望写 空 / 清空 / 为空 = 该列应为空值
             else:
                 want = exp
             if not same(got, want):
@@ -301,21 +328,39 @@ def write_xlsx_safely(df: pd.DataFrame, path: Path) -> Path:
     raise PermissionError(f"无法写入 {path} 及其备选文件名, 请关闭占用的 Excel 窗口")
 
 
-def resolve_path(p: str | Path, base_dir: Path) -> Path:
-    path = Path(str(p))
-    return path if path.is_absolute() else base_dir / path
+def bind_inputs(rs: RuleSet, base_dir: Path, overrides: dict[str, str] | None) -> dict[str, tuple[Path, str | None]]:
+    """每个声明的输入对应一个文件: 命令行给的 (相对当前目录) 优先, 否则规则文件里的默认文件 (相对规则文件目录)。"""
+    overrides = dict(overrides or {})
+    unknown = [n for n in overrides if n not in rs.names]
+    if unknown:
+        raise ValueError(f"命令行给的输入「{unknown[0]}」不是规则声明的输入 (规则声明了: {', '.join(rs.names)})")
+    bound: dict[str, tuple[Path, str | None]] = {}
+    missing: list[str] = []
+    for spec in rs.inputs:
+        if spec.name in overrides:
+            bound[spec.name] = split_sheet(overrides[spec.name])
+        elif spec.path:
+            bound[spec.name] = split_sheet(spec.path, base_dir)
+        else:
+            missing.append(spec.name)
+    if missing:
+        raise ValueError(
+            f"输入「{'」「'.join(missing)}」没有绑定文件: 规则文件里没写默认文件, 命令行也没给 (-i 名称=路径)"
+        )
+    return bound
 
 
 @dataclass
 class RunResult:
     ruleset: RuleSet
     tests: list[TestOutcome]
-    keys: list[str] = field(default_factory=list)
+    keys: list[str] = field(default_factory=list)  # 主表上用来标识一行的列 (第一个参照表的匹配键, 没有就是第一列)
     out: pd.DataFrame | None = None
     changed: pd.DataFrame | None = None
     written: Path | None = None
     stopped_by_tests: bool = False
     notes: list[str] = field(default_factory=list)
+    inputs: dict[str, tuple[Path, int]] = field(default_factory=dict)  # 输入名 -> (实际读的文件, 行数)
 
     @property
     def tests_passed(self) -> int:
@@ -326,13 +371,15 @@ def run(
     rules_path: str | Path,
     *,
     base_dir: str | Path | None = None,
+    inputs: dict[str, str] | None = None,
+    output: str | Path | None = None,
     ignore_tests: bool = False,
     dry_run: bool = False,
-    output: str | Path | None = None,
 ) -> RunResult:
-    """完整流程: 加载规则 -> 跑内嵌测试 -> 读两表 -> 执行 -> 写出。
+    """完整流程: 加载规则 -> 跑内嵌测试 -> 绑定并读入各输入表 -> 执行 -> 写出。
 
-    规则文件里的相对路径 (左表 / 右表 / 输出) 相对 base_dir, 默认为规则文件所在目录。
+    inputs: {输入名: 文件路径 (可带 #sheet名)}, 覆盖规则文件里的默认文件, 相对当前目录。
+    规则文件里的相对路径 (默认文件 / 输出) 相对 base_dir, 默认为规则文件所在目录。
     """
     rules_path = Path(rules_path)
     base = Path(base_dir) if base_dir else rules_path.parent
@@ -341,25 +388,24 @@ def run(
     if any(not o.passed for o in outcomes) and not ignore_tests:
         return RunResult(rs, outcomes, stopped_by_tests=True)
 
-    for key in ("左表", "右表", "匹配键"):
-        if key not in rs.match:
-            raise ValueError(f"匹配设置缺少「{key}」")
-    left = read_table(resolve_path(rs.match["左表"], base))
-    right = read_table(resolve_path(rs.match["右表"], base))
-    keys = [k.strip() for k in str(rs.match["匹配键"]).split(",")]
+    bound = bind_inputs(rs, base, inputs)
+    tables = {name: read_table(p, sheet) for name, (p, sheet) in bound.items()}
+    primary_df = tables[rs.primary.name]
 
     notes: list[str] = []
-    ns = build_namespace(rs, left, right, keys, notes)
-    add_derived(rs, ns, left.index, lenient=False)
-    originals = {col: left[col] for col in rs.outputs if col in left.columns}
-    results, hit_ids = apply_rules(rs, ns, originals, labels=left[keys[0]])
+    ns = build_namespace(rs, tables, notes)
+    add_derived(rs, ns, primary_df.index, lenient=False)
+    originals = {col: primary_df[col] for col in rs.outputs if col in primary_df.columns}
+    first = rs.lookups[0].keys if rs.lookups else []
+    keys = [t for _, t in first] or [str(primary_df.columns[0])]
+    results, hit_ids = apply_rules(rs, ns, originals, labels=primary_df[keys[0]])
 
-    out = left.copy()
+    out = primary_df.copy()
     details: list[str] = []
-    for i in left.index:
+    for i in primary_df.index:
         parts = []
         for col in rs.outputs:
-            old = left[col].loc[i] if col in left.columns else None
+            old = primary_df[col].loc[i] if col in primary_df.columns else None
             new = results[col].loc[i]
             if not same(old, new):
                 parts.append(f"{col}: {fmt(old)} -> {fmt(new)}")
@@ -372,6 +418,11 @@ def run(
 
     written = None
     if not dry_run:
-        out_path = Path(output) if output else resolve_path(rs.match.get("输出", "output/结果.xlsx"), base)
+        if output:
+            out_path = Path(output)
+        else:
+            default = rs.settings.get("输出") or f"output/{bound[rs.primary.name][0].stem}_更新后.xlsx"
+            out_path = resolve_path(default, base)
         written = write_xlsx_safely(out, out_path)
-    return RunResult(rs, outcomes, keys, out, changed, written, notes=notes)
+    read_info = {name: (p, len(tables[name])) for name, (p, _) in bound.items()}
+    return RunResult(rs, outcomes, keys, out, changed, written, notes=notes, inputs=read_info)

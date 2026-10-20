@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目定位
 
-rule-sheet: 把「两份 Excel 互相比较, 按规则更新字段」的业务规则从代码里抽出来, 写成非编码人员能读、能改的规则文件 (Excel 决策表 / YAML), 由 Python 解释器执行。
+rule-sheet: 把「若干份 Excel 按键对上, 按规则更新其中一份」的业务规则从代码里抽出来, 写成非编码人员能读、能改的规则文件 (Excel 决策表 / YAML), 由 Python 解释器执行。模型是 规则文件 (形参: 输入声明 + 规则 + 测试) + 输入文件绑定 (实参: 规则里的默认文件或命令行 `-i 名称=路径`) → 输出文件 (主表副本 + 审计列)。
 
 业界对标: DMN 决策表 (Camunda / Drools / GoRules) 的思路, 简化为 Excel 原生布局 + 中文关键词。设计取舍见 README「条件之间的 AND / OR」与「命中策略」两节。
 
@@ -42,7 +42,7 @@ uv run --script examples/status-machine/make_samples.py    # 第二个样例同�
 
 ## 执行管线 (跨文件, 改引擎前先读)
 
-`load_rules` 按后缀分派到 `load_excel_rules` / `load_yaml_rules`, 两者汇合成同一个 `RuleSet`; 之后 `engine.run` 依次: `run_tests` -> `read_table` 读左右表 -> `build_namespace` 合并 -> `add_derived` 派生变量 -> `apply_rules` -> 拼审计列 -> `write_xlsx_safely` (被 Excel 占用时自动 `_v2`/`_v3`)。
+`load_rules` 按后缀分派到 `load_excel_rules` / `load_yaml_rules`, 两者汇合成同一个 `RuleSet`; 之后 `engine.run` 依次: `run_tests` -> `bind_inputs` (命令行 `-i` 相对当前目录优先, 否则规则里的默认文件相对规则目录, 都没有报错) -> `read_table` 读各输入表 (`split_sheet` 拆 `#sheet名`) -> `build_namespace` 以主表为锚逐个 left join 参照表 -> `add_derived` 派生变量 -> `apply_rules` -> 拼审计列 -> `write_xlsx_safely` (被 Excel 占用时自动 `_v2`/`_v3`)。
 
 - **一切向量化**: `Namespace` 是 `{变量名: pd.Series}` (整列); `Condition = Callable[[Namespace], Any]` 可返回含 NaN 的 Series 或标量, 由 `conditions.to_mask` 统一归一成布尔 mask (NaN 视为不命中); `apply_rules` 用 `Series.mask` 按优先级倒序覆盖写入。不要在规则层写逐行循环
 - **内嵌测试复用引擎**: `run_tests` 把每条用例构造成 1 行的 `Namespace`, 走同一套 `add_derived(lenient=True)` + `apply_rules`。改 `apply_rules` 语义会同时影响真实数据与用例
@@ -50,15 +50,16 @@ uv run --script examples/status-machine/make_samples.py    # 第二个样例同�
   - 条件: Excel 每个输入格一个 `cell_condition` (走 `unary_test`), 相邻同 ID 行合成 `any_of([all_of(行)...])`; YAML 整棵 `当:` 树一个 `build_condition` (走 `eval_expr`)
   - `rs.variables` (用例未给即视为空的变量清单): Excel 取表头输入列 + `find_names` 扫描输入格 / 输出格 / 派生变量表达式得到的列 (`..` 区间语法前先补空格, 扫描器的边界不认 `.` 前缀); YAML 靠 `expressions.find_names` 扫描 `当` / `则` / `变量` 的文本 (名字可含 `-` `/` 全角括号, `-`/`/` 后紧跟 `别名.`/数字/已知名字才算运算符; 反引号包裹的整体算一个名字; 引号字符串不扫)。YAML 里新增写变量名的位置要同步进这段扫描。扫描器宁可少认不可多认: 多认会把 `本期.金额-上期.金额` 整体当成空变量, 测试静默算错
   - `rs.outputs` 顺序: Excel 按表头输出列; YAML 按 `则:` 首次出现
-  - 测试列名校验 (`loaders._check_test_columns`) 两边共用: 期望列 ⊆ 输出列, 输入列 ⊆ 变量 ∪ 派生 ∪ `<右别名>.存在` ∪ `基准日期` ∪ `<左别名>.<输出列>`
+  - 测试列名校验 (`loaders._check_test_columns`) 两边共用: 期望列 ⊆ 输出列, 输入列 ⊆ 变量 ∪ 派生 ∪ `<参照表名>.存在` ∪ `基准日期` ∪ `<主表名>.<输出列>`
+  - 输入声明 (`loaders._build_inputs`) 两边共用: Excel「输入」sheet 一行一个 (名称 / 匹配 / 重复键 / 文件), YAML `输入: {名: {文件, 匹配, 重复键}}`; 主表那行「匹配」必须写 `主表` (`model.PRIMARY_WORD`, 单输入可省), 其它写键 (`k` 或 `本表列 = 主表.列`, 逗号分隔, 只能对齐到主表); 「设置」sheet / `设置:` 只认 基准日期 / 输出。旧「匹配设置」/ `匹配:` 由 `_legacy_inputs` 折算 (保留一个版本), YAML 两者都没有也走旧默认 主表 / 本月
 - **表达式求值**: `eval_expr` 把中文变量名按长度降序替换为 `_vN` (跳过引号字符串; 反引号 `` `名字` `` 整体查), `且`/`或`/`非` 换成 `and`/`or`/`not`, 然后 `ast.parse` → `expressions._Rewrite` 改写 → `compile` (按文本 `lru_cache`) → 受限 `eval`。改写把 `BoolOp`/`Not` 换成逐元素的 `_all`/`_any`/`_not`, 六个比较和 `in`/`not in` 换成「任一侧为空就不成立」的 helper, 链式比较拆段; 算术 / 函数调用不碰。可用函数只有 `expressions.FUNCS` 里那几个; 加内置函数就加在这个 dict, 且必须对 Series 逐行生效 (所以不开放 `float` / `str` / `int`, 它们对整列不是逐行的)。真值归一统一走 `expressions.truth` (NaN 算 False; `NaN.astype(bool)` 是 True, 别直接用)
-- **Excel 版式契约** (`loaders._parse_header` 与两个 `make_samples.py` 必须一致): sheet 名固定为 匹配设置 / 变量定义 / 决策表 / 测试 (匹配设置 与 决策表 缺失即报错, 另两个可选); 表头按内容定位: 写着 `规则ID` (测试 sheet: `用例`) 的第一行是列类型行 (`RULE_KINDS` / `TEST_KINDS` 白名单, 拼错报错; 标了类型的列必须有列名), 下一行是列名行, 再下一行起正文; 之前的行是元信息, 命中策略靠 `命中策略` 标签右边一格 (没有标签就认一个单独写着策略名的格, 按 `model.HIT_POLICIES` 校验); 优先级留空取 `1000 + 行序`; 相邻同 ID 行是续行 (优先级 / 输出留空或与首行相同, 否则报错; 不相邻的重复 ID 报错); 合并单元格由 `_rows` 展开成左上格的值。工作簿用 `data_only=False` 读: 以 `=` 开头的格 (如 `= 本期.类别-会议`) 会被 Excel / openpyxl 存成公式, `data_only=True` 读到 None 条件就静默变成不关心 (2026-10-19 实测); 生成脚本写这类格要 `cell.data_type = "s"`
+- **Excel 版式契约** (`loaders._parse_header` 与两个 `make_samples.py` 必须一致): sheet 名固定为 输入 / 设置 / 变量定义 / 决策表 / 测试 (输入 与 决策表 缺失即报错, 其余可选; 旧的 匹配设置 仍认); 表头按内容定位: 写着 `规则ID` (测试 sheet: `用例`) 的第一行是列类型行 (`RULE_KINDS` / `TEST_KINDS` 白名单, 拼错报错; 标了类型的列必须有列名), 下一行是列名行, 再下一行起正文; 之前的行是元信息, 命中策略靠 `命中策略` 标签右边一格 (没有标签就认一个单独写着策略名的格, 按 `model.HIT_POLICIES` 校验); 优先级留空取 `1000 + 行序`; 相邻同 ID 行是续行 (优先级 / 输出留空或与首行相同, 否则报错; 不相邻的重复 ID 报错); 合并单元格由 `_rows` 展开成左上格的值。工作簿用 `data_only=False` 读: 以 `=` 开头的格 (如 `= 本期.类别-会议`) 会被 Excel / openpyxl 存成公式, `data_only=True` 读到 None 条件就静默变成不关心 (2026-10-19 实测); 生成脚本写这类格要 `cell.data_type = "s"`
 
 ## 核心语义约定 (改代码前先读)
 
 - **读表**: 一律走 `engine.read_table` (`dtype=object` + `infer_objects`)。pandas 3 的 `read_excel` 默认把文本单元格的 "007" 读成 7、电话读成浮点, 直接用会丢数据 (2026-10-19 实测 pandas 3.0.6)
-- **匹配**: 左表 left join 右表, 变量命名 `<左表别名>.<列>` / `<右表别名>.<列>`, 内置 `<右表别名>.存在`、`基准日期`
-- **路径**: 规则文件里的相对路径以规则文件所在目录为基准 (`--base-dir` 可覆盖)
+- **匹配**: 输入 ≥ 1, 恰一个主表 (输出的行 / 写回的列都是它的); 每个参照表单独按自己的键 left join 到主表 (左侧只带主表键列, 参照表之间同名列互不干扰; 参照表键为空的行先剔掉, 否则 pandas merge 把 NaN 配 NaN 让 `存在` 假阳性), 变量命名 `<输入名>.<列>`, 内置 `<参照表名>.存在`、`基准日期`; 参照表的键列不暴露。输入名对引擎是不透明字符串, 不要在引擎里写死 本期 / 上期 / 客户
+- **路径**: 规则文件里的相对路径 (默认文件 / 输出) 以规则文件所在目录为基准 (`--base-dir` 可覆盖); 命令行 `-i` 给的相对当前目录。默认输出 `output/<主表文件名>_更新后.xlsx`
 - **单元格条件** (FEEL 一元测试子集): `-` 不关心 / 字面量等于 / 比较 (右侧可为变量名) / `[a..b]` 区间 / 逗号枚举 (OR) / `= 空` `!= 空` `空` (同义: `为空` `非空`) / `not(...)`
 - **空值语义**: 空值参与任何比较都不成立 (SQL 风格), 单元格和表达式一样 (0.3 起表达式经 AST 改写; 0.2 的表达式 `!=` 对空值为真); 单元格 `not(...)` 只对有值的格成立, 仅 `not(空)` / `not(为空)` / `not(非空)` 是纯否定; 表达式的 `非` 和 YAML 的 `不满足:` 是纯取反 (空值行也为真), 这是保留的不对称, 见 `docs/设计架构.md` 5.3
 - **关键字 `空`** (`model.NULL_WORD` / 哨兵 `model.NULL`, 0.4 起): 判空的主推写法是 `x == 空` / `x != 空` (单元格 `= 空` / `!= 空` / 单独 `空`), `为空(x)` / `非空(x)` 是同义。它不是值: `_cmp` 与 `unary_test` 的比较分支特判哨兵, 其它运算符 / 算术 / 函数参数报错; `属于` 与 `in` 的枚举里认它; 输出格 `空` / `=空` 等价 `清空`; 测试期望格与输入格写 `空` = 空值; 派生变量算出 `NULL` 置成空列。不加 `null` 别名 (导出数据里常有文本 "null")
@@ -82,6 +83,6 @@ uv run --script examples/status-machine/make_samples.py    # 第二个样例同�
 ## 已知局限 (候选 roadmap, 未排序)
 
 - 表达式走 Python `eval`, 规则文件视为可信输入; 多人场景需换受限求值器
-- 一对多匹配只支持「取第一条」
+- 一对多匹配只支持「取第一条」/ 报错; 参照表只对齐到主表 (星型), 无链式连接; 输出只有主表一张
 - 无静态校验: 重叠规则、永不命中的规则、未覆盖的输入组合
 - Gherkin 无执行器

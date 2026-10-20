@@ -1,7 +1,8 @@
 """规则文件加载: Excel 决策表 与 YAML 两种前端, 都产出 RuleSet。
 
-加载阶段尽量把「写错了但不报错、测试假通过」的情况拦下来: 表头位置、列类型拼写、列名缺失、
-测试用例的输入列 / 期望列对不上输出列或变量、重复的规则 ID、空的测试 sheet, 都在这里报错。
+规则文件声明的是「形参」: 有哪些输入 (名字、怎么对齐到主表)、变量、规则、测试; 输入的默认文件只是可选的绑定,
+真正的文件可以在命令行给。加载阶段尽量把「写错了但不报错、测试假通过」的情况拦下来: 表头位置、列类型拼写、
+列名缺失、测试用例的输入列 / 期望列对不上输出列或变量、重复的规则 ID、空的测试 sheet, 都在这里报错。
 """
 
 from __future__ import annotations
@@ -14,12 +15,27 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from .conditions import all_of, any_of, build_condition, cell_condition, strings_in
-from .expressions import FUNCS, find_names
-from .model import BASE_DATE_VAR, BLANK_WORDS, EXIST_VAR, HIT_POLICIES, Condition, Rule, RuleSet, TestCase
+from .expressions import FUNCS, find_names, split_top_level
+from .model import (
+    BASE_DATE_VAR,
+    BLANK_WORDS,
+    DUP_POLICIES,
+    EXIST_VAR,
+    HIT_POLICIES,
+    PRIMARY_WORD,
+    SETTING_KEYS,
+    Condition,
+    InputSpec,
+    Rule,
+    RuleSet,
+    TestCase,
+)
 
 RULE_KINDS = ("规则ID", "优先级", "输入", "输出", "说明")
 TEST_KINDS = ("用例", "输入", "期望", "说明")
+INPUT_COLS = ("名称", "匹配", "重复键", "文件", "说明")
 POLICY_LABEL = "命中策略"
+LEGACY_DEFAULT_NAMES = ("主表", "本月")  # 0.4 以前「匹配设置」里左右表别名的默认值
 
 
 def _check_policy(policy: Any) -> str:
@@ -47,12 +63,99 @@ def _at(row: list[Any], i: int | None) -> Any:
     return row[i] if i is not None and i < len(row) else None
 
 
+# ---------------------------------------------------------------------------
+# 输入声明 (两种前端共用)
+# ---------------------------------------------------------------------------
+
+
+def _parse_keys(text: str, name: str, primary: str, names: list[str], where: str) -> list[tuple[str, str]]:
+    """「匹配」格: `岗位编码` (两边同名) / `工号 = 本期.拟任人工号` (本输入的列 = 主表的列), 多个键逗号分隔。"""
+    if not text:
+        raise ValueError(
+            f"{where}: 输入「{name}」没有写「匹配」: 主表写 {PRIMARY_WORD}, "
+            f"其它输入写对齐到主表的键 (如 岗位编码, 或 工号 = {primary}.拟任人工号)"
+        )
+    keys: list[tuple[str, str]] = []
+    for part in split_top_level(text):
+        mine, _, theirs = part.partition("=")
+        mine, theirs = mine.strip(), theirs.strip() or mine.strip()
+        prefix, dot, rest = theirs.partition(".")
+        if dot and prefix == primary:
+            theirs = rest
+        elif dot and prefix in names:
+            raise ValueError(
+                f"{where}: 输入「{name}」的匹配键「{part.strip()}」只能对齐到主表「{primary}」, 不能对齐到「{prefix}」"
+            )
+        keys.append((mine, theirs))
+    return keys
+
+
+def _build_inputs(rows: list[tuple[str, Any, Any, Any]], where: str) -> list[InputSpec]:
+    """rows: (名称, 匹配, 重复键, 文件)。恰有一个输入的「匹配」写 主表 (只有一个输入时可省), 其它写对齐到主表的键。"""
+    if not rows:
+        raise ValueError(f"{where}: 没有声明任何输入")
+    names = [r[0] for r in rows]
+    dup = [n for n in names if names.count(n) > 1]
+    if dup:
+        raise ValueError(f"{where}: 输入名「{dup[0]}」重复")
+    primaries = [r[0] for r in rows if _text(r[1]) == PRIMARY_WORD]
+    if len(rows) == 1 and not primaries and not _text(rows[0][1]):
+        primaries = [rows[0][0]]
+    if len(primaries) != 1:
+        raise ValueError(
+            f"{where}: 必须恰有一个输入的「匹配」写 {PRIMARY_WORD} (输出的行就是它的行), "
+            f"现在有 {len(primaries)} 个 ({', '.join(primaries) or '无'}); 其它输入写对齐到主表的键"
+        )
+    primary = primaries[0]
+    specs: list[InputSpec] = []
+    for name, match, dup_policy, path in rows:
+        file = _text(path) or None
+        if name == primary:
+            specs.append(InputSpec(name, primary=True, path=file))
+            continue
+        policy = _text(dup_policy) or "取第一条"
+        if policy not in DUP_POLICIES:
+            raise ValueError(f"{where}: 输入「{name}」的「重复键」只认 {' / '.join(DUP_POLICIES)}, 不认识「{policy}」")
+        specs.append(
+            InputSpec(name, keys=_parse_keys(_text(match), name, primary, names, where), dup_policy=policy, path=file)
+        )
+    return specs
+
+
+def _check_settings(settings: dict[str, Any], where: str) -> dict[str, Any]:
+    bad = [k for k in settings if k not in SETTING_KEYS]
+    if bad:
+        raise ValueError(f"{where}: 设置项「{bad[0]}」不认识, 只认: {' / '.join(SETTING_KEYS)}")
+    return {k: v for k, v in settings.items() if v not in (None, "")}
+
+
+def _legacy_inputs(match: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
+    """0.4 以前的「匹配设置」/ YAML 匹配: 左表 / 右表 / 左表别名 / 右表别名 / 匹配键 / 右表重复键 / 基准日期 / 输出。"""
+    la = _text(match.get("左表别名")) or LEGACY_DEFAULT_NAMES[0]
+    ra = _text(match.get("右表别名")) or LEGACY_DEFAULT_NAMES[1]
+    keys = [k.strip() for k in str(match.get("匹配键") or "").split(",") if k.strip()]
+    policy = _text(match.get("右表重复键")) or "取第一条"
+    inputs = [
+        InputSpec(la, primary=True, path=_text(match.get("左表")) or None),
+        InputSpec(
+            ra,
+            keys=[(k, k) for k in keys],
+            dup_policy="取第一条" if policy == "取第一条" else "报错",
+            path=_text(match.get("右表")) or None,
+        ),
+    ]
+    settings = {k: match[k] for k in SETTING_KEYS if match.get(k) not in (None, "")}
+    return inputs, settings
+
+
 def _allowed_test_inputs(
-    variables: list[str], derived: list[tuple[str, str]], la: str, ra: str, outputs: list[str]
+    variables: list[str], derived: list[tuple[str, str]], inputs: list[InputSpec], outputs: list[str]
 ) -> set[str]:
-    """测试用例里可以给值的名字: 规则引用的变量、派生变量、内置变量、输出列的原值 (<左别名>.<输出列>)。"""
-    names = set(variables) | {k for k, _ in derived} | {f"{ra}.{EXIST_VAR}", BASE_DATE_VAR}
-    return names | {f"{la}.{o}" for o in outputs}
+    """测试用例里可以给值的名字: 规则引用的变量、派生变量、内置变量、输出列的原值 (<主表>.<输出列>)。"""
+    primary = next(s.name for s in inputs if s.primary)
+    names = set(variables) | {k for k, _ in derived} | {BASE_DATE_VAR}
+    names |= {f"{s.name}.{EXIST_VAR}" for s in inputs if not s.primary}
+    return names | {f"{primary}.{o}" for o in outputs}
 
 
 def _check_test_columns(
@@ -94,6 +197,22 @@ def _read_kv(ws: Any) -> dict[str, Any]:
         if row and row[0] not in (None, "") and len(row) > 1 and row[1] not in (None, ""):
             out[str(row[0]).strip()] = row[1]
     return out
+
+
+def _read_inputs_sheet(ws: Any) -> list[InputSpec]:
+    """「输入」sheet: 第 1 行列名 (名称 / 匹配 / 重复键 / 文件 / 说明, 顺序随意), 之后每行一个输入。"""
+    grid = _rows(ws)
+    header = [_text(v) for v in grid[0]] if grid else []
+    col = {h: i for i, h in enumerate(header) if h}
+    for need in ("名称", "匹配"):
+        if need not in col:
+            raise ValueError(f"「输入」sheet 第 1 行缺少「{need}」列 (列名: {' / '.join(INPUT_COLS)})")
+    rows = []
+    for row in grid[1:]:
+        name = _text(_at(row, col["名称"]))
+        if name:
+            rows.append((name, _at(row, col["匹配"]), _at(row, col.get("重复键")), _at(row, col.get("文件"))))
+    return _build_inputs(rows, "「输入」sheet")
 
 
 def _parse_header(
@@ -150,11 +269,16 @@ def load_excel_rules(path: Path) -> RuleSet:
     # data_only=True 读到的是公式的缓存结果 (没算过是 None, 算过是 #NAME?), 条件就静默变成「不关心」。
     # 这里按原文读, 规则工作簿里的 = 一律是 rule-sheet 表达式, 不支持写 Excel 公式。
     wb = load_workbook(path, data_only=False)
-    for sheet in ("匹配设置", "决策表"):
-        if sheet not in wb.sheetnames:
-            raise ValueError(f"规则文件缺少「{sheet}」sheet: {path.name}")
-    match = _read_kv(wb["匹配设置"])
-    la, ra = str(match.get("左表别名", "主表")), str(match.get("右表别名", "本月"))
+    if "决策表" not in wb.sheetnames:
+        raise ValueError(f"规则文件缺少「决策表」sheet: {path.name}")
+    if "输入" in wb.sheetnames:
+        inputs = _read_inputs_sheet(wb["输入"])
+        settings = _check_settings(_read_kv(wb["设置"]), "「设置」sheet") if "设置" in wb.sheetnames else {}
+    elif "匹配设置" in wb.sheetnames:  # 0.4 以前的写法, 保留一个版本的兼容
+        inputs, settings = _legacy_inputs(_read_kv(wb["匹配设置"]))
+    else:
+        raise ValueError(f"规则文件缺少「输入」sheet (声明有哪些输入、怎么对齐到主表): {path.name}")
+    names = [s.name for s in inputs]
     derived: list[tuple[str, str]] = []
     if "变量定义" in wb.sheetnames:
         derived = [
@@ -169,25 +293,25 @@ def load_excel_rules(path: Path) -> RuleSet:
     id_col = next(i for i, k, _ in cols if k == "规则ID")
     pri_col = next((i for i, k, _ in cols if k == "优先级"), None)
     desc_col = next((i for i, k, _ in cols if k == "说明"), None)
-    inputs = [(i, n) for i, k, n in cols if k == "输入"]
-    outputs = [(i, n) for i, k, n in cols if k == "输出"]
+    in_cols = [(i, n) for i, k, n in cols if k == "输入"]
+    out_cols = [(i, n) for i, k, n in cols if k == "输出"]
 
     # 相邻的同 ID 行是同一条规则的多个「或」分支: 每行内各输入格 AND, 行间 OR; 优先级 / 输出 / 说明以首行为准
     rules: list[Rule] = []
     branches: list[list[list[Condition]]] = []
     first_row: list[int] = []
     seen: dict[str, int] = {}
-    cell_texts: list[str] = []  # 输入格 / 输出格原文, 之后扫描里面引用的变量 (!= 上期.x / =主表.y * 2 / 本月.z)
+    cell_texts: list[str] = []  # 输入格 / 输出格原文, 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 本期.z)
     for offset, row in enumerate(grid[body_start:]):
         excel_row = body_start + offset + 1
         rid = _text(_at(row, id_col))
         if not rid:
             continue
         pri_raw = _at(row, pri_col)
-        outs = {name: _at(row, i) for i, name in outputs}
-        conds = [cell_condition(name, _at(row, i)) for i, name in inputs]
-        cells = [_at(row, i) for i, _ in inputs] + list(outs.values())
-        # 区间 [0..主表.上限] 里变量紧跟在 .. 后面, 扫描器的名字边界不认 . 前缀, 先把 .. 隔开
+        outs = {name: _at(row, i) for i, name in out_cols}
+        conds = [cell_condition(name, _at(row, i)) for i, name in in_cols]
+        cells = [_at(row, i) for i, _ in in_cols] + list(outs.values())
+        # 区间 [0..本期.上限] 里变量紧跟在 .. 后面, 扫描器的名字边界不认 . 前缀, 先把 .. 隔开
         cell_texts.extend(v.replace("..", " .. ") for v in cells if isinstance(v, str))
         if rules and rid == rules[-1].rule_id:
             rule = rules[-1]
@@ -226,11 +350,11 @@ def load_excel_rules(path: Path) -> RuleSet:
             rule.conditions = [any_of([all_of(b) for b in brs])]
 
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
-    input_names = [n for _, n in inputs]
+    input_names = [n for _, n in in_cols]
     texts = cell_texts + [e for _, e in derived]
-    extra = sorted({n for t in texts for n in find_names(t, (la, ra), known)} - set(input_names))
+    extra = sorted({n for t in texts for n in find_names(t, names, known)} - set(input_names))
     variables = input_names + extra  # 表头输入列 + 单元格与派生变量表达式里引用的列, 用例没给的都视为空
-    output_names = [n for _, n in outputs]
+    output_names = [n for _, n in out_cols]
 
     tests: list[TestCase] = []
     if "测试" in wb.sheetnames:
@@ -239,7 +363,7 @@ def load_excel_rules(path: Path) -> RuleSet:
         case_col = next(i for i, k, _ in tcols if k == "用例")
         t_inputs = [(i, n) for i, k, n in tcols if k == "输入"]
         t_expect = [(i, n) for i, k, n in tcols if k == "期望"]
-        allowed = _allowed_test_inputs(variables, derived, la, ra, output_names)
+        allowed = _allowed_test_inputs(variables, derived, inputs, output_names)
         _check_test_columns("「测试」sheet", [n for _, n in t_inputs], [n for _, n in t_expect], allowed, output_names)
         for row in tgrid[tstart:]:
             if not _text(_at(row, case_col)):
@@ -254,7 +378,9 @@ def load_excel_rules(path: Path) -> RuleSet:
         if not tests:
             raise ValueError("「测试」sheet 里没有任何用例 (「用例」列为空的行会跳过); 写上用例, 或删掉这张 sheet")
 
-    return RuleSet(match, derived, hit_policy, rules, output_names, tests, source=path.name, variables=variables)
+    return RuleSet(
+        inputs, settings, derived, hit_policy, rules, output_names, tests, source=path.name, variables=variables
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -262,8 +388,30 @@ def load_excel_rules(path: Path) -> RuleSet:
 # ---------------------------------------------------------------------------
 
 
+def _yaml_inputs(doc: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
+    """YAML: 输入: {名字: {文件, 匹配, 重复键}} + 设置: {基准日期, 输出}; 没有 输入: 时按 0.4 以前的 匹配: 折算。"""
+    if "输入" in doc and "匹配" in doc:
+        raise ValueError("YAML 里 输入: 和旧写法 匹配: 不能同时出现")
+    if "输入" not in doc:
+        return _legacy_inputs(dict(doc.get("匹配") or {}))
+    rows = []
+    for name, v in (doc.get("输入") or {}).items():
+        if isinstance(v, dict):
+            bad = [k for k in v if k not in ("文件", "匹配", "重复键", "说明")]
+            if bad:
+                raise ValueError(f"YAML 输入「{name}」里的「{bad[0]}」不认识, 只认: 文件 / 匹配 / 重复键 / 说明")
+            rows.append((str(name), v.get("匹配"), v.get("重复键"), v.get("文件")))
+        else:
+            rows.append((str(name), None, None, v))  # 只写一个字符串 = 文件名
+    inputs = _build_inputs(rows, "YAML 输入:")
+    settings = _check_settings(dict(doc.get("设置") or {}), "YAML 设置:")
+    return inputs, settings
+
+
 def load_yaml_rules(path: Path) -> RuleSet:
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    inputs, settings = _yaml_inputs(doc)
+    names = [s.name for s in inputs]
     rules: list[Rule] = []
     outputs: list[str] = []
     for order, r in enumerate(doc.get("规则") or []):
@@ -285,28 +433,27 @@ def load_yaml_rules(path: Path) -> RuleSet:
             if col not in outputs:
                 outputs.append(col)
     derived = [(str(k), str(v)) for k, v in (doc.get("变量") or {}).items()]
-    match = dict(doc.get("匹配") or {})
-    la, ra = str(match.get("左表别名", "主表")), str(match.get("右表别名", "本月"))
-    # 扫描 当 / 则 / 变量 里引用到的 <别名>.<列> 变量名; YAML 里新增写变量名的位置要同步加进 texts
+    # 扫描 当 / 则 / 变量 里引用到的 <输入名>.<列> 变量名; YAML 里新增写变量名的位置要同步加进 texts
     texts = [s for r in doc.get("规则") or [] for s in strings_in(r.get("当"))]
     texts += [str(v) for r in doc.get("规则") or [] for v in (r.get("则") or {}).values()]
     texts += [v for _, v in derived]
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
-    variables = sorted({n for t in texts for n in find_names(t, (la, ra), known)} | {k for k, _ in derived})
+    variables = sorted({n for t in texts for n in find_names(t, names, known)} | {k for k, _ in derived})
 
     tests: list[TestCase] = []
-    allowed = _allowed_test_inputs(variables, derived, la, ra, outputs)
+    allowed = _allowed_test_inputs(variables, derived, inputs, outputs)
     for i, t in enumerate(doc.get("测试") or []):
         name = str(t.get("用例", f"T{i + 1}"))
-        inputs = {str(k): v for k, v in (t.get("输入") or {}).items()}
+        given = {str(k): v for k, v in (t.get("输入") or {}).items()}
         expected = {str(k): v for k, v in (t.get("期望") or {}).items()}
-        _check_test_columns(f"测试用例「{name}」", list(inputs), list(expected), allowed, outputs)
-        tests.append(TestCase(name, inputs, expected))
+        _check_test_columns(f"测试用例「{name}」", list(given), list(expected), allowed, outputs)
+        tests.append(TestCase(name, given, expected))
     if "测试" in doc and not tests:
         raise ValueError("YAML 的 测试: 下没有任何用例; 写上用例, 或删掉这个键")
 
     return RuleSet(
-        match,
+        inputs,
+        settings,
         derived,
         _check_policy(doc.get("命中策略")),
         rules,

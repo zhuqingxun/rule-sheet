@@ -1,8 +1,10 @@
 """命令行入口。
 
-rule-sheet run  <规则文件> [--base-dir DIR] [--output PATH] [--ignore-tests] [--dry-run]
+rule-sheet run  <规则文件> [-i 名称=路径[#sheet]]... [-o 输出路径] [--base-dir DIR] [--ignore-tests] [--dry-run]
 rule-sheet test <规则文件>
 rule-sheet <规则文件>            等价于 run
+
+规则文件声明输入 (形参), 命令行用 -i 把文件绑定上去 (实参); 规则文件里写了默认文件的可以不给。
 """
 
 from __future__ import annotations
@@ -43,7 +45,10 @@ def _print_run(res: RunResult) -> None:
         print("有测试未通过, 停止处理真实数据 (加 --ignore-tests 可强制继续)")
         return
     assert res.out is not None and res.changed is not None
-    print(f"\n== 处理真实数据 ==\n左表 {len(res.out)} 行, 匹配键 {res.keys}")
+    print("\n== 处理真实数据 ==")
+    for name, (path, rows) in res.inputs.items():
+        tag = " (主表)" if name == rs.primary.name else ""
+        print(f"输入: {name}{tag} = {path}, {rows} 行")
     for note in res.notes:
         print(f"提示: {note}")
     show_cols = res.keys + ["命中规则", "变更明细"]
@@ -55,19 +60,37 @@ def _print_run(res: RunResult) -> None:
         print("\n--dry-run: 未写文件")
 
 
+def _parse_inputs(items: list[str]) -> dict[str, str]:
+    inputs: dict[str, str] = {}
+    for item in items:
+        name, sep, path = item.partition("=")
+        if not sep or not name.strip() or not path.strip():
+            raise ValueError(f"-i 要写成 名称=路径, 收到的是 {item!r}")
+        inputs[name.strip()] = path.strip()
+    return inputs
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rule-sheet", description="把 Excel 比对更新规则写成决策表 / YAML 并执行")
+    parser = argparse.ArgumentParser(prog="rule-sheet", description="规则文件 + 若干输入表 -> 按规则更新后的输出表")
     parser.add_argument("--version", action="version", version=f"rule-sheet {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="跑内嵌测试, 通过后处理真实数据并写出结果")
+    p_run = sub.add_parser("run", help="跑内嵌测试, 通过后读入各输入表、执行规则并写出结果")
     p_run.add_argument("rules", type=Path, help="规则文件: .xlsx 决策表 或 .yaml")
+    p_run.add_argument(
+        "-i",
+        "--input",
+        action="append",
+        default=[],
+        metavar="名称=路径",
+        help="绑定一个输入 (可重复; 路径可带 #sheet名, 相对当前目录), 覆盖规则文件里写的默认文件",
+    )
+    p_run.add_argument("-o", "--output", type=Path, help="输出文件路径, 覆盖规则文件里的设置")
     p_run.add_argument("--base-dir", type=Path, help="规则文件内相对路径的基准目录 (默认: 规则文件所在目录)")
-    p_run.add_argument("--output", type=Path, help="覆盖规则文件里的输出路径")
-    p_run.add_argument("--ignore-tests", action="store_true", help="测试失败也继续")
+    p_run.add_argument("--ignore-tests", action="store_true", help="内嵌测试失败也继续")
     p_run.add_argument("--dry-run", action="store_true", help="只打印, 不写文件")
 
-    p_test = sub.add_parser("test", help="只跑规则文件内嵌的测试用例")
+    p_test = sub.add_parser("test", help="只跑规则文件内嵌的测试用例, 不读数据表")
     p_test.add_argument("rules", type=Path, help="规则文件: .xlsx 决策表 或 .yaml")
     return parser
 
@@ -91,9 +114,10 @@ def main(argv: list[str] | None = None) -> int:
         res = run(
             ns.rules,
             base_dir=ns.base_dir,
+            inputs=_parse_inputs(ns.input),
+            output=ns.output,
             ignore_tests=ns.ignore_tests,
             dry_run=ns.dry_run,
-            output=ns.output,
         )
         _print_run(res)
         return 1 if res.stopped_by_tests else 0

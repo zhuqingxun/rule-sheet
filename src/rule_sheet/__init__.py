@@ -4,7 +4,7 @@ from .engine import RunResult, TestOutcome, apply_rules, build_namespace, run, r
 from .loaders import load_excel_rules, load_rules, load_yaml_rules
 from .model import Rule, RuleSet, TestCase
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "Rule",

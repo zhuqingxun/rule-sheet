@@ -1,6 +1,6 @@
 [project]
 name = "rule-sheet"
-version = "0.4.0"
+version = "0.5.0"
 description = "把 Excel 比对更新规则写成非编码人员可读可改的决策表 / YAML, 由同一个解释器执行"
 readme = "README.md"
 requires-python = ">=3.11"

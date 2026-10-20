@@ -19,9 +19,9 @@
     uv run python examples/status-machine/make_samples.py
 
 产物:
-    本期岗位.xlsx      被更新的左表
-    上期岗位.xlsx      参照用的右表
-    规则_决策表.xlsx   四张 sheet: 匹配设置 / 变量定义 / 决策表 / 测试
+    本期岗位.xlsx      被更新的主表 (规则里叫 本期)
+    上期岗位.xlsx      参照表 (规则里叫 上期)
+    规则_决策表.xlsx   五张 sheet: 输入 / 设置 / 变量定义 / 决策表 / 测试
 """
 from __future__ import annotations
 
@@ -136,6 +136,16 @@ def write_kv_sheet(ws: Worksheet, title: tuple[str, str, str], rows: list[tuple[
     set_widths(ws, widths)
 
 
+def write_table_sheet(ws: Worksheet, header: tuple[str, ...], rows: list[tuple[Any, ...]], widths: list[int]) -> None:
+    """第 1 行列名, 之后一行一条记录 (「输入」sheet 用)。"""
+    for c, name in enumerate(header, start=1):
+        put(ws, 1, c, name, bold=True, fill="D9D9D9")
+    for r, row in enumerate(rows, start=2):
+        for c, val in enumerate(row, start=1):
+            put(ws, r, c, val, bold=(c == 1), fill=FILL_BY_KIND["说明"] if header[c - 1] == "说明" else None)
+    set_widths(ws, widths)
+
+
 def write_rule_table(ws: Worksheet, top_note: list[Any] | None, kinds: list[str], names: list[str],
                      rows: list[list[Any]], widths: list[int]) -> int:
     """表头两行 (列类型 / 列名), 之前可以有一行元信息 (命中策略 / 说明); 表头之后每行一条规则。返回正文起始行号。"""
@@ -164,19 +174,21 @@ def write_rule_table(ws: Worksheet, top_note: list[Any] | None, kinds: list[str]
 def build_rules() -> None:
     wb = Workbook()
 
-    # ---- sheet 1: 匹配设置 --------------------------------------------------
+    # ---- sheet 1: 输入 (形参: 名称 + 怎么对齐到主表; 文件只是默认绑定, 命令行 -i 可覆盖) ----
     ws = wb.active
-    ws.title = "匹配设置"
-    write_kv_sheet(ws, ("设置项", "值", "说明"), [
-        ("左表", "本期岗位.xlsx", "被更新的表, 相对路径以本规则文件所在目录为基准"),
-        ("右表", "上期岗位.xlsx", "参照表, 只读"),
-        ("左表别名", "本期", "规则里引用左表字段的前缀, 如 本期.类别-会议"),
-        ("右表别名", "上期", "规则里引用右表字段的前缀, 如 上期.类别-会议"),
-        ("匹配键", "岗位编码", "两表按此列对行"),
-        ("输出", "output/本期岗位_更新后.xlsx", "结果文件, 原表不动"),
-    ], widths=[14, 32, 52])
+    ws.title = "输入"
+    write_table_sheet(ws, ("名称", "匹配", "重复键", "文件", "说明"), [
+        ("本期", "主表", None, "本期岗位.xlsx", "被更新的表: 输出的行就是它的行。规则里引用它的列写 本期.类别-会议"),
+        ("上期", "岗位编码", "取第一条", "上期岗位.xlsx", "参照表, 按 岗位编码 对齐到主表; 引用写 上期.类别-会议, 上期.存在 = 是否匹配到"),
+    ], widths=[10, 14, 10, 24, 70])
 
-    # ---- sheet 2: 变量定义 --------------------------------------------------
+    # ---- sheet 2: 设置 (可选) ------------------------------------------------
+    ws = wb.create_sheet("设置")
+    write_kv_sheet(ws, ("设置项", "值", "说明"), [
+        ("输出", "output/本期岗位_更新后.xlsx", "默认输出路径, 命令行 -o 可覆盖; 不写则是 output/<主表文件名>_更新后.xlsx"),
+    ], widths=[14, 32, 60])
+
+    # ---- sheet 3: 变量定义 --------------------------------------------------
     ws = wb.create_sheet("变量定义")
     write_kv_sheet(ws, ("变量", "定义", "说明"), [
         ("拟任人有变化", "本期.拟任人 != 上期.拟任人 或 (上期.拟任人 == 空 且 本期.拟任人 != 空)",
@@ -189,7 +201,7 @@ def build_rules() -> None:
         ("可用函数", None, "abs  round  天数差(晚, 早)  非空(x)  为空(x)  属于(x, 值1, 值2, ...)"),
     ], widths=[16, 70, 60])
 
-    # ---- sheet 3: 决策表 ----------------------------------------------------
+    # ---- sheet 4: 决策表 ----------------------------------------------------
     ws = wb.create_sheet("决策表")
     kinds = ["规则ID", "优先级", "输入", "输入", "输入", "输入", "输出", "说明"]
     names = ["规则ID", "优先级", "本期.类别-会议", "上期.类别-会议", "拟任人有变化", "流程节点有变化", "状态-会议", "说明"]
@@ -211,7 +223,7 @@ def build_rules() -> None:
     ws.merge_cells(start_row=s3, start_column=1, end_row=s3 + 1, end_column=1)
     ws.merge_cells(start_row=s3, start_column=2, end_row=s3 + 1, end_column=2)
 
-    # ---- sheet 4: 测试 (表头直接从第 1 行开始, 表头位置按内容识别) --------------
+    # ---- sheet 5: 测试 (表头直接从第 1 行开始, 表头位置按内容识别) --------------
     ws = wb.create_sheet("测试")
     kinds = ["用例", "输入", "输入", "输入", "输入", "输入", "输入", "输入", "期望", "说明"]
     names = ["用例", "本期.类别-会议", "本期.状态-会议", "上期.类别-会议",

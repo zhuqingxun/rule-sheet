@@ -13,7 +13,10 @@ NULL_WORD = "空"  # 空值关键字: 条件里与 = / != 搭配判空 (本期.x
 CLEAR_WORDS = {"清空", "置空"}  # 输出格: 把目标列写成空值 (区别于 - 的「不改」)
 EXPECT_NULL_WORDS = CLEAR_WORDS | {"为空", NULL_WORD}  # 测试用例期望格: 期望该列为空 (留空仍是「不变」)
 HIT_POLICIES = ("优先级", "唯一", "首次命中")
-EXIST_VAR = "存在"  # 右表是否匹配到, 实际变量名是 <右表别名>.存在
+DUP_POLICIES = ("取第一条", "报错")  # 参照表匹配键重复时
+PRIMARY_WORD = "主表"  # 「输入」里主表那一行的「匹配」写它: 输出的行就是主表的行, 其它输入都对齐到它
+SETTING_KEYS = ("基准日期", "输出")
+EXIST_VAR = "存在"  # 参照表是否匹配到, 实际变量名是 <输入名>.存在
 BASE_DATE_VAR = "基准日期"
 
 Namespace = dict[str, Any]
@@ -62,10 +65,25 @@ class TestCase:
 
 
 @dataclass
+class InputSpec:
+    """规则声明的一个输入 (形参): 名字是规则里引用列的前缀 (<名字>.<列>)。
+
+    文件是可选的默认绑定 (相对规则文件目录), 命令行 -i 名字=路径 可覆盖。主表之外的输入各自按 keys 对齐到主表。
+    """
+
+    name: str
+    primary: bool = False
+    keys: list[tuple[str, str]] = field(default_factory=list)  # (本输入的列, 主表的列); 主表为空
+    dup_policy: str = "取第一条"  # 见 DUP_POLICIES
+    path: str | None = None  # 可带 #sheet名
+
+
+@dataclass
 class RuleSet:
-    match: dict[str, Any]
+    inputs: list[InputSpec]  # 恰有一个 primary
+    settings: dict[str, Any]  # 基准日期 / 输出 (默认输出路径)
     derived: list[tuple[str, str]]  # (变量名, 表达式), 按定义顺序求值
-    hit_policy: str  # 优先级 / 唯一
+    hit_policy: str  # 见 HIT_POLICIES
     rules: list[Rule]
     outputs: list[str]
     tests: list[TestCase] = field(default_factory=list)
@@ -73,9 +91,13 @@ class RuleSet:
     variables: list[str] = field(default_factory=list)  # 规则引用到的变量, 测试用例没给的视为空值
 
     @property
-    def left_alias(self) -> str:
-        return str(self.match.get("左表别名", "主表"))
+    def primary(self) -> InputSpec:
+        return next(s for s in self.inputs if s.primary)
 
     @property
-    def right_alias(self) -> str:
-        return str(self.match.get("右表别名", "本月"))
+    def lookups(self) -> list[InputSpec]:
+        return [s for s in self.inputs if not s.primary]
+
+    @property
+    def names(self) -> list[str]:
+        return [s.name for s in self.inputs]
