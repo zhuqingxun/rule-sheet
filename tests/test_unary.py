@@ -78,6 +78,23 @@ def test_null_tests():
     assert hits("为空", s("a", None)) == [False, True]
 
 
+def test_null_keyword_in_cells():
+    """单元格里 空 / = 空 / != 空 就是判空, 和 为空 / 非空 同义; 空 不是值, 大小比较和区间端点报错; 文字「空」加引号。"""
+    var = s("a", None, "")
+    assert hits("空", var) == [False, True, False]
+    assert hits("= 空", var) == [False, True, False]
+    assert hits("== 空", var) == [False, True, False]
+    assert hits("!= 空", var) == [True, False, True]
+    assert hits("<> 空", var) == [True, False, True]
+    assert hits("not(空)", var) == [True, False, True]
+    assert hits("活跃, 空", s("活跃", None, "x")) == [True, True, False]
+    assert hits('"空"', s("空", None)) == [True, False]
+    with pytest.raises(ValueError, match="空 只能和 = / != 搭配"):
+        hits("> 空", s(1, 2))
+    with pytest.raises(ValueError, match="区间端点不能是 空"):
+        hits("[空..5]", s(1, 2))
+
+
 def test_not_excludes_nulls_except_for_null_tests():
     assert hits("not(活跃)", s("活跃", "试用", None)) == [False, True, False]
     assert hits("not(VIP, 金卡)", s("VIP", "普通", None)) == [False, True, False]

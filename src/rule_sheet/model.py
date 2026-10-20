@@ -9,8 +9,9 @@ from typing import Any
 TRUE_WORDS = {"是", "true", "True", "TRUE", "yes"}
 FALSE_WORDS = {"否", "false", "False", "FALSE", "no"}
 BLANK_WORDS = {"", "-", "—", "任意"}
+NULL_WORD = "空"  # 空值关键字: 条件里与 = / != 搭配判空 (本期.x == 空), 输出格 / 期望格 / 测试输入里就是空值
 CLEAR_WORDS = {"清空", "置空"}  # 输出格: 把目标列写成空值 (区别于 - 的「不改」)
-EXPECT_NULL_WORDS = CLEAR_WORDS | {"为空"}  # 测试用例期望格: 期望该列为空 (留空仍是「不变」)
+EXPECT_NULL_WORDS = CLEAR_WORDS | {"为空", NULL_WORD}  # 测试用例期望格: 期望该列为空 (留空仍是「不变」)
 HIT_POLICIES = ("优先级", "唯一", "首次命中")
 EXIST_VAR = "存在"  # 右表是否匹配到, 实际变量名是 <右表别名>.存在
 BASE_DATE_VAR = "基准日期"
@@ -27,6 +28,19 @@ class _Clear:
 
 
 CLEAR = _Clear()
+
+
+class _Null:
+    """表达式里 空 关键字求值的结果。它不是一个值: 只能和 == / != 搭配 (就是判空), 别的运算一律报错。"""
+
+    def __repr__(self) -> str:
+        return "空"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+NULL = _Null()
 
 
 @dataclass

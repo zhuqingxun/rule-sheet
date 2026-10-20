@@ -143,6 +143,34 @@ def test_clear_output_writes_null(ns_two_rows):
     assert res["d"].tolist() == ["清空", "keep", "清空"]
 
 
+def test_null_keyword_in_outputs_tests_and_derived(ns_two_rows):
+    """关键字 空: 输出格 (空 / =空) 等价于 清空; 期望格写 空 = 期望为空; 输入写 空 = 空值; 派生变量算出 空 = 空列。"""
+    r = Rule("R", 1, [cell_condition("本月.存在", "是")], {"a": "空", "b": "=空", "c": "= 空"})
+    keep = {k: pd.Series(["keep"] * 3) for k in "abc"}
+    res, _ = apply_rules(make_rs([r], ["a", "b", "c"]), ns_two_rows, keep)
+    assert res["a"].tolist() == res["b"].tolist() == res["c"].tolist() == [None, "keep", None]
+
+    r1 = Rule("R1", 1, [cell_condition("主表.状态", "空")], {"备注": "没状态"})
+    r2 = Rule("R2", 2, [cell_condition("主表.状态", "活跃")], {"备注": "空"})
+    rs = make_rs(
+        [r1, r2],
+        ["备注"],
+        tests=[
+            TestCase("输入写 空 = 空值", {"主表.状态": "空", "主表.备注": "旧"}, {"备注": "没状态"}),
+            TestCase("期望写 空 = 期望为空", {"主表.状态": "活跃", "主表.备注": "旧"}, {"备注": "空"}),
+            TestCase("没清就失败", {"主表.状态": "休眠", "主表.备注": "旧"}, {"备注": "空"}),
+        ],
+        variables=["主表.状态"],
+    )
+    outcomes = run_tests(rs)
+    assert [o.passed for o in outcomes] == [True, True, False]
+    assert outcomes[2].problems == ["备注: 期望 空, 实际 旧"]
+
+    ns = dict(ns_two_rows)
+    add_derived(make_rs([], [], derived=[("占位", "空")]), ns, ns["主表.金额"].index, lenient=False)
+    assert ns["占位"].isna().all()
+
+
 def test_clear_takes_part_in_priority_merge(ns_two_rows):
     # 清空 和普通输出一样参与逐列合并: 优先级数字小的 清空 赢过数字大的写值, 反过来也一样
     r1 = Rule("R1", 1, [cell_condition("本月.存在", "是")], {"x": "清空"})

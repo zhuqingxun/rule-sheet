@@ -24,7 +24,7 @@ from typing import Any
 
 import pandas as pd
 
-from .model import FALSE_WORDS, TRUE_WORDS, Namespace
+from .model import FALSE_WORDS, NULL, NULL_WORD, TRUE_WORDS, Namespace
 
 # ---------------------------------------------------------------------------
 # 空值与真值
@@ -32,8 +32,8 @@ from .model import FALSE_WORDS, TRUE_WORDS, Namespace
 
 
 def is_na(x: Any) -> bool:
-    """标量是否为空值 (None / NaN / NaT); 列表、元组等容器不算空。"""
-    if x is None:
+    """标量是否为空值 (None / NaN / NaT / 关键字 空); 列表、元组等容器不算空。"""
+    if x is None or x is NULL:
         return True
     try:
         return bool(pd.isna(x))
@@ -71,15 +71,41 @@ def _days_between(later: Any, earlier: Any) -> Any:
 
 
 def _notna(x: Any) -> Any:
-    return x.notna() if isinstance(x, pd.Series) else pd.notna(x)
+    return x.notna() if isinstance(x, pd.Series) else not is_na(x)
 
 
 def _isna(x: Any) -> Any:
-    return x.isna() if isinstance(x, pd.Series) else pd.isna(x)
+    return x.isna() if isinstance(x, pd.Series) else is_na(x)
+
+
+def _values(b: Any) -> tuple[list[Any], bool]:
+    """枚举值列表, 以及其中是否含关键字 空 (属于(x, "a", 空) = x 是 a 或 x 为空)。"""
+    if isinstance(b, pd.Series):
+        vals = b.tolist()
+    elif isinstance(b, (list, tuple, set, frozenset)):
+        vals = list(b)
+    else:
+        vals = [b]
+    return [v for v in vals if v is not NULL], any(v is NULL for v in vals)
+
+
+def _in(a: Any, b: Any) -> Any:
+    vals, has_null = _values(b)
+    if isinstance(a, pd.Series):
+        m = a.isin(vals) & a.notna()
+        return m | a.isna() if has_null else m
+    return has_null if is_na(a) else a in vals
+
+
+def _not_in(a: Any, b: Any) -> Any:
+    vals, _ = _values(b)  # 空值的 not in 永远不成立: 列表里有 空 时它在列表里, 没有时空值比较不成立
+    if isinstance(a, pd.Series):
+        return ~a.isin(vals) & a.notna()
+    return (not is_na(a)) and a not in vals
 
 
 def _isin(x: Any, *values: Any) -> Any:
-    return x.isin(values) if isinstance(x, pd.Series) else x in values
+    return _in(x, values)
 
 
 FUNCS: dict[str, Any] = {
@@ -122,38 +148,22 @@ def _not(x: Any) -> Any:
     return ~t if isinstance(t, pd.Series) else not t
 
 
-def _cmp(op: Callable[[Any, Any], Any]) -> Callable[[Any, Any], Any]:
+def _cmp(op: Callable[[Any, Any], Any], symbol: str) -> Callable[[Any, Any], Any]:
     """比较: 任一侧为空就不成立 (SQL 风格, 与单元格一致)。
 
     pandas 原生只有 != 对空值返回 True; Python 标量 None == None 为 True、None > 1 直接报错。
+    关键字 空 是唯一的例外: `x == 空` / `x != 空` 就是判空 (FEEL 对 null 的相等也是这么特例的), 其它运算符碰到它报错。
     """
 
     def f(a: Any, b: Any) -> Any:
+        if a is NULL or b is NULL:
+            if op not in (operator.eq, operator.ne):
+                raise ValueError(f"空 只能和 == / != 搭配, 不能用 {symbol}")
+            other = b if a is NULL else a
+            return _isna(other) if op is operator.eq else _notna(other)
         return truth(op(a, b)) & _present(a) & _present(b)
 
     return f
-
-
-def _values(b: Any) -> list[Any]:
-    if isinstance(b, pd.Series):
-        return b.tolist()
-    if isinstance(b, (list, tuple, set, frozenset)):
-        return list(b)
-    return [b]
-
-
-def _in(a: Any, b: Any) -> Any:
-    vals = _values(b)
-    if isinstance(a, pd.Series):
-        return a.isin(vals) & a.notna()
-    return (not is_na(a)) and a in vals
-
-
-def _not_in(a: Any, b: Any) -> Any:
-    vals = _values(b)
-    if isinstance(a, pd.Series):
-        return ~a.isin(vals) & a.notna()
-    return (not is_na(a)) and a not in vals
 
 
 _HELPERS: dict[str, Any] = {
@@ -162,12 +172,12 @@ _HELPERS: dict[str, Any] = {
     "_not": _not,
     "_in": _in,
     "_not_in": _not_in,
-    "_eq": _cmp(operator.eq),
-    "_ne": _cmp(operator.ne),
-    "_lt": _cmp(operator.lt),
-    "_le": _cmp(operator.le),
-    "_gt": _cmp(operator.gt),
-    "_ge": _cmp(operator.ge),
+    "_eq": _cmp(operator.eq, "=="),
+    "_ne": _cmp(operator.ne, "!="),
+    "_lt": _cmp(operator.lt, "<"),
+    "_le": _cmp(operator.le, "<="),
+    "_gt": _cmp(operator.gt, ">"),
+    "_ge": _cmp(operator.ge, ">="),
 }
 _CMP_CALLS: dict[type, str] = {
     ast.Eq: "_eq",
@@ -279,6 +289,7 @@ def eval_expr(expr: str, ns: Namespace) -> Any:
     text = outside_strings(expr, substitute).strip()  # 开头的 非 换成 not 后会带出前导空格, ast 会当成缩进
     local.update(FUNCS)
     local.update(_HELPERS)
+    local[NULL_WORD] = NULL
     try:
         code = _compile(text)
     except SyntaxError as exc:
@@ -295,6 +306,10 @@ def eval_expr(expr: str, ns: Namespace) -> Any:
             raise ValueError(
                 f"表达式求值失败: {expr!r} (对整列做了真假判断; 条件组合用 且 / 或 / 非, 不支持 if-else 三元写法)"
             ) from exc
+        raise ValueError(f"表达式求值失败: {expr!r} ({exc})") from exc
+    except TypeError as exc:
+        if "_Null" in str(exc):  # 空 + 1 / abs(空) 之类: 空 不是值
+            raise ValueError(f"表达式求值失败: {expr!r} (空 只能和 == / != 搭配, 不能参与运算或传给函数)") from exc
         raise ValueError(f"表达式求值失败: {expr!r} ({exc})") from exc
     except Exception as exc:
         raise ValueError(f"表达式求值失败: {expr!r} ({exc})") from exc
@@ -380,6 +395,8 @@ def literal(token: str, ns: Namespace, var: pd.Series | None = None) -> Any:
     t = token.strip()
     if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
         return t[1:-1]
+    if t == NULL_WORD:
+        return NULL
     if t in ns:
         return ns[t]
     if var is not None and var.dtype == bool:

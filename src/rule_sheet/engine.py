@@ -14,7 +14,18 @@ from openpyxl.utils import get_column_letter
 from .conditions import ns_index, resolve_output, to_mask
 from .expressions import eval_expr, is_na
 from .loaders import load_rules
-from .model import BASE_DATE_VAR, CLEAR, EXIST_VAR, EXPECT_NULL_WORDS, TRUE_WORDS, Namespace, Rule, RuleSet
+from .model import (
+    BASE_DATE_VAR,
+    CLEAR,
+    EXIST_VAR,
+    EXPECT_NULL_WORDS,
+    NULL,
+    NULL_WORD,
+    TRUE_WORDS,
+    Namespace,
+    Rule,
+    RuleSet,
+)
 
 Mask = pd.Series
 
@@ -84,6 +95,8 @@ def add_derived(rs: RuleSet, ns: Namespace, index: pd.Index, *, lenient: bool) -
             if not lenient:
                 raise
             val = float("nan")
+        if val is NULL:
+            val = None
         if not isinstance(val, pd.Series):
             val = pd.Series([val] * len(index), index=index)
         ns[name] = val
@@ -226,7 +239,7 @@ def run_tests(rs: RuleSet) -> list[TestOutcome]:
         for name, val in tc.inputs.items():
             if name == exist_var and isinstance(val, str):
                 val = val.strip() in TRUE_WORDS
-            if isinstance(val, str) and val.strip() == "":
+            if isinstance(val, str) and val.strip() in ("", NULL_WORD):  # 留空或写 空 = 空值
                 val = None
             if val is None and name in derived_names:
                 continue  # 派生变量留空 = 没给, 按表达式推导 (Excel 测试 sheet 每列每行都在, 留空不能算「给了空值」)

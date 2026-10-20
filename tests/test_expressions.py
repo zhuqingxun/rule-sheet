@@ -67,6 +67,22 @@ def test_chained_comparison_and_in(ns_two_rows):
     assert eval_expr('s in ("a",)', {"s": None}) is False
 
 
+def test_null_keyword_is_a_null_test(ns_two_rows):
+    """关键字 空: == 空 / != 空 就是判空 (与 为空 / 非空 同义); 它不是值, 其它运算一律报错。"""
+    assert eval_expr("主表.电话 == 空", ns_two_rows).tolist() == [False, True, False]
+    assert eval_expr("空 == 主表.电话", ns_two_rows).tolist() == [False, True, False]
+    assert eval_expr("本月.电话 != 空", ns_two_rows).tolist() == [True, True, False]
+    assert eval_expr("上期 == 空", {"上期": None}) is True and eval_expr("上期 != 空", {"上期": 1}) is True
+    assert eval_expr("空 == 空", {"x": 1}) is True
+    assert eval_expr('属于(主表.状态, "活跃", 空)', ns_two_rows).tolist() == [True, False, True]
+    assert eval_expr('主表.状态 in ("活跃", 空)', ns_two_rows).tolist() == [True, False, True]
+    assert eval_expr('主表.状态 not in ("活跃", 空)', ns_two_rows).tolist() == [False, True, False]
+    assert eval_expr("主表.电话 == 本月.电话", {"主表.电话": None, "本月.电话": None}) is False  # 两个空变量仍不相等
+    for bad in ("主表.金额 > 空", "空 + 1", "abs(空)"):
+        with pytest.raises(ValueError, match="空 只能和 == / != 搭配"):
+            eval_expr(bad, ns_two_rows)
+
+
 def test_string_literals_are_left_alone():
     ns = {"主表.状态": pd.Series(["主表.状态", "或", "x"], dtype=object)}
     assert eval_expr('主表.状态 == "主表.状态"', ns).tolist() == [True, False, False]  # 字符串里的变量名不替换

@@ -4,7 +4,8 @@
 - 条件组合: 全部满足 / 任一满足 / 不满足 (YAML 前端)
 - 输出格: 不改 / 清空 / 字面值 / 复制变量 / =表达式
 
-空值约定: 空值参与任何比较都不成立 (SQL 风格); 判空必须显式写 `为空` / `非空`。
+空值约定: 空值参与任何比较都不成立 (SQL 风格); 判空必须显式写: `= 空` / `!= 空` (或 `为空` / `非空`)。
+关键字 空 在输出格里等价于 清空。
 """
 
 from __future__ import annotations
@@ -18,13 +19,13 @@ from typing import Any
 import pandas as pd
 
 from .expressions import dangling_name, eval_expr, literal, split_top_level, truth, undefined_variable
-from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, Condition, Namespace
+from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, NULL, NULL_WORD, Condition, Namespace
 
 Mask = pd.Series
 
 _RANGE_RE = re.compile(r"^([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)])$")
 _CMP_RE = re.compile(r"^(>=|<=|!=|<>|==|=|>|<)\s*(.+)$")
-_NULL_TESTS = ("为空", "非空")
+_NULL_TESTS = ("为空", "非空", NULL_WORD)
 
 
 def _both_present(var: pd.Series, rhs: Any) -> Mask:
@@ -60,15 +61,21 @@ def unary_test(cell: Any, var: pd.Series, ns: Namespace) -> Mask:
         return m
     if s == "非空":
         return var.notna()
-    if s == "为空":
+    if s in ("为空", NULL_WORD):
         return var.isna()
     if m := _RANGE_RE.match(s):
         lo, hi = literal(m.group(2), ns, var), literal(m.group(3), ns, var)
+        if lo is NULL or hi is NULL:
+            raise ValueError(f"单元格条件 {s!r}: 区间端点不能是 空")
         lo_ok = (var >= lo) if m.group(1) == "[" else (var > lo)
         hi_ok = (var <= hi) if m.group(4) == "]" else (var < hi)
         return lo_ok & hi_ok & var.notna()
     if m := _CMP_RE.match(s):
         op, rhs = m.group(1), literal(m.group(2), ns, var)
+        if rhs is NULL:  # = 空 / != 空 就是判空; 空 不是值, 大小比较报错
+            if op in ("=", "==", "!=", "<>"):
+                return var.isna() if op in ("=", "==") else var.notna()
+            raise ValueError(f"单元格条件 {s!r}: 空 只能和 = / != 搭配, 不能用 {op}")
         ok = _both_present(var, rhs)
         if op in ("=", "=="):
             return (var == rhs) & ok
@@ -175,10 +182,11 @@ def resolve_output(spec: Any, ns: Namespace) -> Any:
         s = spec.strip()
         if s in BLANK_WORDS:
             return None
-        if s in CLEAR_WORDS:
+        if s in CLEAR_WORDS or s == NULL_WORD:
             return CLEAR
         if s.startswith("="):
-            return eval_expr(s[1:], ns)
+            val = eval_expr(s[1:], ns)
+            return CLEAR if val is NULL else val  # =空 与 清空 同义
         if s in ns:
             return ns[s]
         if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
