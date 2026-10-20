@@ -12,7 +12,7 @@ import pandas as pd
 from openpyxl.utils import get_column_letter
 
 from .conditions import ns_index, resolve_output, to_mask
-from .expressions import eval_expr
+from .expressions import eval_expr, is_na
 from .loaders import load_rules
 from .model import BASE_DATE_VAR, CLEAR, EXIST_VAR, EXPECT_NULL_WORDS, TRUE_WORDS, Namespace, Rule, RuleSet
 
@@ -119,6 +119,9 @@ def apply_rules(
         之后走与 优先级 相同的逐列合并, 此时每行至多一条规则, 结果就是该规则的输出 (- 的列保持原值)。
     """
     index = ns_index(ns)
+    dup = sorted({r.rule_id for r in rs.rules if sum(x.rule_id == r.rule_id for x in rs.rules) > 1})
+    if dup:  # 两个加载器都已拦截, 这里兜底: masks 按 ID 建字典, 重复 ID 会静默丢掉一条规则
+        raise ValueError(f"规则 ID 重复: {', '.join(dup)}")
     masks = {r.rule_id: rule_mask(r, ns, index) for r in rs.rules}
     ordered = sorted(rs.rules, key=lambda r: r.priority)  # 稳定排序: 同优先级保持书写顺序
 
@@ -169,15 +172,6 @@ def apply_rules(
 # ---------------------------------------------------------------------------
 
 
-def is_na(x: Any) -> bool:
-    if x is None:
-        return True
-    try:
-        return bool(pd.isna(x))
-    except (TypeError, ValueError):
-        return False
-
-
 def same(a: Any, b: Any) -> bool:
     if is_na(a) or is_na(b):
         return is_na(a) and is_na(b)
@@ -222,6 +216,7 @@ class TestOutcome:
 def run_tests(rs: RuleSet) -> list[TestOutcome]:
     exist_var = f"{rs.right_alias}.{EXIST_VAR}"
     outcomes: list[TestOutcome] = []
+    derived_names = {d for d, _ in rs.derived}
     for tc in rs.tests:
         index = pd.RangeIndex(1)
         ns: Namespace = {}
@@ -230,10 +225,11 @@ def run_tests(rs: RuleSet) -> list[TestOutcome]:
                 val = val.strip() in TRUE_WORDS
             if isinstance(val, str) and val.strip() == "":
                 val = None
+            if val is None and name in derived_names:
+                continue  # 派生变量留空 = 没给, 按表达式推导 (Excel 测试 sheet 每列每行都在, 留空不能算「给了空值」)
             dtype = object if isinstance(val, str) or val is None else None
             ns[name] = pd.Series([val], index=index, dtype=dtype)
         ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.match.get(BASE_DATE_VAR) or date.today()))
-        derived_names = {d for d, _ in rs.derived}
         for name in rs.variables:  # 用例没提到的变量 = 空值
             if name not in ns and name not in derived_names:
                 ns[name] = pd.Series([None], index=index, dtype=object)

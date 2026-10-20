@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from rule_sheet.expressions import eval_expr, find_names, literal, split_top_level
+from rule_sheet.expressions import eval_expr, find_names, literal, split_top_level, truth
 
 
 def test_longest_name_wins(ns_two_rows):
@@ -32,6 +32,59 @@ def test_scalar_namespace_works_too():
 def test_failure_mentions_expression():
     with pytest.raises(ValueError, match="未定义变量"):
         eval_expr("未定义变量 > 1", {"x": 1})
+
+
+# ---------------------------------------------------------------------------
+# AST 改写: 逻辑连接词按元素运算 (issue #7), != / in 空值不成立 (issue #5), 链式比较
+# ---------------------------------------------------------------------------
+
+
+def test_logic_words_work_on_whole_columns(ns_two_rows):
+    want = [True, False, False]  # 行 1 主表电话空, 行 2 本月电话空
+    assert eval_expr("非空(本月.电话) 且 非空(主表.电话) 且 本月.电话 != 主表.电话", ns_two_rows).tolist() == want
+    assert eval_expr("非空(本月.电话) and 非空(主表.电话) and (本月.电话 != 主表.电话)", ns_two_rows).tolist() == want
+    assert eval_expr('主表.状态 == "活跃" 或 本月.存在 == 否', ns_two_rows).tolist() == [True, True, False]
+    assert eval_expr('主表.状态 == "活跃" or 本月.存在 == 否', ns_two_rows).tolist() == [True, True, False]
+    assert eval_expr('非 (主表.状态 == "活跃")', ns_two_rows).tolist() == [False, True, True]  # 纯取反, 空值行也为真
+    assert eval_expr("not 本月.存在", ns_two_rows).tolist() == [False, True, False]
+    assert eval_expr("非空(本月.电话) 且 非空(主表.电话)", {"本月.电话": "a", "主表.电话": None}) is False  # 标量也行
+
+
+def test_not_equal_is_null_safe_like_cells(ns_two_rows):
+    # pandas 原生 != 对空值返回 True; 改写后任一侧为空就不成立, 与决策表单元格的 != 一致
+    assert eval_expr("本月.电话 != 主表.电话", ns_two_rows).tolist() == [True, False, False]
+    assert eval_expr('主表.状态 != "活跃"', ns_two_rows).tolist() == [False, True, False]
+    assert eval_expr("本月.金额 != 1", ns_two_rows).tolist() == [True, False, True]  # NaN != 1 不成立
+    assert eval_expr("a != 1", {"a": None}) is False and eval_expr("a != 1", {"a": 2}) is True
+    assert eval_expr("a == b", {"a": None, "b": None}) is False
+
+
+def test_chained_comparison_and_in(ns_two_rows):
+    assert eval_expr("5000 <= 主表.金额 <= 10000", ns_two_rows).tolist() == [True, False, True]
+    assert eval_expr("0 < 本月.金额 < 10500", ns_two_rows).tolist() == [False, False, True]
+    assert eval_expr('主表.状态 in ("活跃", "试用")', ns_two_rows).tolist() == [True, False, False]
+    assert eval_expr('主表.状态 not in ("活跃", "试用")', ns_two_rows).tolist() == [False, True, False]  # 空值不成立
+    assert eval_expr('s in ("a",)', {"s": None}) is False
+
+
+def test_string_literals_are_left_alone():
+    ns = {"主表.状态": pd.Series(["主表.状态", "或", "x"], dtype=object)}
+    assert eval_expr('主表.状态 == "主表.状态"', ns).tolist() == [True, False, False]  # 字符串里的变量名不替换
+    assert eval_expr('主表.状态 == "或"', ns).tolist() == [False, True, False]  # 字符串里的连接词不替换
+    assert eval_expr("主表.状态 == '或' 或 主表.状态 == 'x'", ns).tolist() == [False, True, True]
+
+
+def test_syntax_and_truth_value_errors_are_readable(ns_two_rows):
+    with pytest.raises(ValueError, match="表达式语法错误"):
+        eval_expr("本月.金额 >", ns_two_rows)
+    with pytest.raises(ValueError, match="真假判断.*且 / 或 / 非"):
+        eval_expr("1 if 本月.存在 else 0", ns_two_rows)
+
+
+def test_truth_treats_null_as_false():
+    assert truth(pd.Series([float("nan"), 1.0, 0.0])).tolist() == [False, True, False]  # NaN.astype(bool) 本来是 True
+    assert truth(pd.Series(["a", None, ""], dtype=object)).tolist() == [True, False, False]
+    assert truth(None) is False and truth(float("nan")) is False and truth("x") is True
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +143,11 @@ def test_name_error_hints_backticks():
         ("本期.金额（万元）> 100", ["本期.金额（万元）"]),  # 全角括号永远不是 Python 语法, 算名字
         ("`本期.金额(万元)` > 100 + 本期.x", ["本期.金额(万元)", "本期.x"]),  # 反引号内容原样作为名字
         ("偏差率 > 0.05", []),
+        ('上期.x == "本期.y"', ["上期.x"]),  # 引号字符串里的不算
+        (
+            "本期.拟任人 != 上期.拟任人 或 (为空(上期.拟任人) 且 非空(本期.拟任人))",
+            ["本期.拟任人", "上期.拟任人", "上期.拟任人", "本期.拟任人"],
+        ),
     ],
 )
 def test_find_names(text, want):

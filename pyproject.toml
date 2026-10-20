@@ -1,6 +1,6 @@
 [project]
 name = "rule-sheet"
-version = "0.2.0"
+version = "0.3.0"
 description = "把 Excel 比对更新规则写成非编码人员可读可改的决策表 / YAML, 由同一个解释器执行"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,6 +39,7 @@ select = ["E", "F", "W", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "examples/**" = ["E501"]  # 样例生成器里的规则表按列对齐, 允许长行
+"docs/**" = ["E501"]  # issue 草稿脚本里是整段 issue 正文
 
 [tool.ruff.format]
-exclude = ["examples/**"]  # 保留样例生成器里手工对齐的表格
+exclude = ["examples/**", "docs/**"]  # 保留样例生成器里手工对齐的表格; issue 草稿脚本不归 ruff 管

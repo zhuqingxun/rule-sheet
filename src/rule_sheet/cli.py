@@ -37,6 +37,8 @@ def _print_run(res: RunResult) -> None:
     if res.tests:
         print(f"\n== 先跑测试用例 ({len(res.tests)} 条) ==")
         _print_tests(res.tests)
+    else:
+        print("提示: 规则文件没有内嵌测试用例, 直接处理真实数据")
     if res.stopped_by_tests:
         print("有测试未通过, 停止处理真实数据 (加 --ignore-tests 可强制继续)")
         return
@@ -79,7 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     ns = build_parser().parse_args(args)
     try:
         if ns.command == "test":
-            outcomes = run_tests(load_rules(ns.rules))
+            rs = load_rules(ns.rules)
+            if not rs.tests:
+                print("规则文件没有测试用例 (Excel 加「测试」sheet / YAML 加 测试:), 什么都没验证")
+                return 1
+            outcomes = run_tests(rs)
             _print_tests(outcomes)
             return 0 if all(o.passed for o in outcomes) else 1
         res = run(

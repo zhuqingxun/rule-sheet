@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from .expressions import eval_expr, literal, split_top_level
+from .expressions import eval_expr, literal, split_top_level, truth
 from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, Condition, Namespace
 
 Mask = pd.Series
@@ -107,9 +107,10 @@ def ns_index(ns: Namespace) -> pd.Index:
 
 
 def to_mask(res: Any, ns: Namespace) -> Mask:
+    """条件结果归一成布尔 mask: 标量广播到整列, 空值视为不命中。"""
     if not isinstance(res, pd.Series):
-        res = pd.Series(bool(res), index=ns_index(ns))
-    return res.fillna(False).astype(bool)
+        return pd.Series(truth(res), index=ns_index(ns))
+    return truth(res)
 
 
 def all_of(conds: list[Condition]) -> Condition:

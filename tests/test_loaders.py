@@ -13,11 +13,15 @@ from .conftest import EXCEL_RULES, YAML_RULES
 
 def test_excel_structure():
     rs = load_rules(EXCEL_RULES)
-    assert [r.rule_id for r in rs.rules] == ["R1", "R2", "R3", "R4", "R5a", "R5b"]
+    assert [r.rule_id for r in rs.rules] == ["R1", "R2", "R3", "R4", "R5"]  # R5 占两行 (或 分支), 仍是一条
     assert rs.outputs == ["状态", "电话", "复核标记", "备注", "提醒"]
     assert rs.hit_policy == "优先级"
     assert len(rs.tests) == 8 and rs.tests[0].name == "T1"
-    assert rs.variables == ["主表.状态", "主表.等级", "偏差率", "本月.存在", "距上次活跃天数", "本月.电话", "主表.电话"]
+    # 表头输入列在前, 之后是派生变量表达式里引用到的列 (用例没给时置空, 派生变量才能算出来)
+    assert rs.variables == [
+        "主表.状态", "主表.等级", "偏差率", "本月.存在", "距上次活跃天数", "本月.电话", "主表.电话",
+        "主表.上次活跃", "主表.金额", "本月.金额",
+    ]  # fmt: skip
     assert [d for d, _ in rs.derived] == ["偏差率", "距上次活跃天数"]
     assert isinstance(rs.match["基准日期"], (date, datetime))
     assert rs.match["匹配键"] == "客户编号"
@@ -139,6 +143,152 @@ def test_excel_policy_validation(tmp_path):
     wb.save(tmp_path / "bad.xlsx")
     with pytest.raises(ValueError, match="未知的命中策略「first」"):
         load_rules(tmp_path / "bad.xlsx")
+
+
+def make_workbook(path, decision, tests=None, derived=None, merges=()):
+    """最小规则工作簿: decision / tests 是整张 sheet 的行 (含表头), merges 是决策表里要合并的区域。"""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "匹配设置"
+    for row in (["设置项", "值"], ["左表", "a.xlsx"], ["右表", "b.xlsx"], ["匹配键", "k"]):
+        ws.append(row)
+    if derived:
+        ws = wb.create_sheet("变量定义")
+        ws.append(["变量", "定义"])
+        for row in derived:
+            ws.append(list(row))
+    ws = wb.create_sheet("决策表")
+    for row in decision:
+        ws.append(row)
+    for rng in merges:
+        ws.merge_cells(rng)
+    if tests is not None:
+        ws = wb.create_sheet("测试")
+        for row in tests:
+            ws.append(row)
+    wb.save(path)
+    return path
+
+
+HEADER = [["规则ID", "优先级", "输入", "输入", "输出"], ["规则ID", "优先级", "主表.a", "主表.b", "标记"]]
+TEST_HEADER = [["用例", "输入", "输入", "期望"], ["用例", "主表.a", "主表.b", "标记"]]
+
+
+def test_excel_header_found_by_content_not_row_number(tmp_path):
+    """issue #6: 表头写在第 1、2 行 (没有元信息行) 也能识别。
+    以前第 2 行被当列类型、第一条用例被当列名, 剩下的用例空输入空期望假通过。"""
+    from rule_sheet.engine import run_tests
+
+    p = make_workbook(
+        tmp_path / "r.xlsx",
+        [*HEADER, ["R1", 1, "x", "-", "命中"]],
+        [*TEST_HEADER, ["T1", "x", None, "命中"], ["T2", "q", None, "命中"]],
+    )
+    rs = load_rules(p)
+    assert rs.hit_policy == "优先级" and [r.rule_id for r in rs.rules] == ["R1"]
+    assert [(t.name, t.inputs["主表.a"]) for t in rs.tests] == [("T1", "x"), ("T2", "q")]
+    assert [o.passed for o in run_tests(rs)] == [True, False]  # T2 不该命中, 现在能抓到
+
+
+def test_excel_policy_label_anywhere_above_header(tmp_path):
+    rule = ["R1", 1, "x", "-", "命中"]
+    p = make_workbook(tmp_path / "r.xlsx", [["说明", "随便写"], [None, "命中策略:", "首次命中"], *HEADER, rule])
+    assert load_rules(p).hit_policy == "首次命中"
+    p = make_workbook(tmp_path / "r2.xlsx", [[None, "唯一"], *HEADER, rule])  # 没有标签, 单独一格策略名也认
+    assert load_rules(p).hit_policy == "唯一"
+
+
+@pytest.mark.parametrize(
+    ("decision", "msg"),
+    [
+        ([["规则", "输入"], ["编号", "主表.a"]], "找不到列类型行"),
+        ([["规则ID", "条件", "输出"], ["规则ID", "主表.a", "标记"]], "列类型「条件」不认识"),
+        ([["规则ID", "输入", "输出"], ["规则ID", None, "标记"]], "B2 格没有写列名"),
+        ([["规则ID", "规则ID"], ["规则ID", "又一个"]], "恰有一列类型为「规则ID」"),
+        ([["规则ID", "输入"]], "下面没有列名行"),
+    ],
+)
+def test_excel_header_errors(tmp_path, decision, msg):
+    with pytest.raises(ValueError, match=msg):
+        load_rules(make_workbook(tmp_path / "r.xlsx", decision))
+
+
+def test_excel_test_sheet_guards(tmp_path):
+    """期望列拼错 = 整列被忽略, 输入列拼错 = 填了不起作用, 空 sheet = 什么都没验证: 三种假通过都在加载时报错。"""
+    rule = [*HEADER, ["R1", 1, "x", "-", "命中"]]
+    kinds = ["用例", "输入", "期望"]
+    with pytest.raises(ValueError, match="「测试」sheet: 期望列「标计」不是输出列"):
+        load_rules(make_workbook(tmp_path / "a.xlsx", rule, [kinds, ["用例", "主表.a", "标计"], ["T1", "x", "命中"]]))
+    with pytest.raises(ValueError, match="输入列「主表.c」不是规则引用到的变量"):
+        load_rules(make_workbook(tmp_path / "b.xlsx", rule, [kinds, ["用例", "主表.c", "标记"], ["T1", "x", "命中"]]))
+    with pytest.raises(ValueError, match="没有任何用例"):
+        load_rules(make_workbook(tmp_path / "c.xlsx", rule, TEST_HEADER))
+    # 输出列的原值 (主表.标记)、派生变量及其引用的列、内置变量 都允许作为输入; 派生变量留空 = 按表达式推导
+    p = make_workbook(
+        tmp_path / "d.xlsx",
+        [["规则ID", "输入", "输出"], ["规则ID", "翻倍", "标记"], ["R1", "> 10", "大"]],
+        [
+            ["用例", "输入", "输入", "输入", "输入", "期望"],
+            ["用例", "主表.标记", "主表.n", "翻倍", "本月.存在", "标记"],
+            ["T1", "旧", 6, None, "是", "大"],
+            ["T2", "旧", 6, 1, "是", None],  # 给了派生变量的值就不再推导: 翻倍 = 1 不命中
+        ],
+        derived=[("翻倍", "主表.n * 2")],
+    )
+    rs = load_rules(p)
+    assert rs.variables == ["翻倍", "主表.n"]
+    from rule_sheet.engine import run_tests
+
+    assert [o.passed for o in run_tests(rs)] == [True, True]
+
+
+def test_excel_continuation_rows_are_or_branches(tmp_path):
+    """issue #8: 相邻的同 ID 行是同一条规则的「或」分支 (每行各格 AND), 规则 ID 可以合并单元格, 输出以首行为准。"""
+    from rule_sheet.engine import apply_rules
+
+    rows = [["R1", 1, "x", "-", "命中"], [None, None, "-", "y", None], ["R2", 2, "-", "-", "兜底"]]
+    p = make_workbook(
+        tmp_path / "r.xlsx",
+        [["命中策略", "首次命中"], *HEADER, *rows],
+        merges=("A4:A5",),  # R1 的规则 ID 合并两行, 第二行读出来是 None, 展开后就是 R1
+    )
+    rs = load_rules(p)
+    assert [r.rule_id for r in rs.rules] == ["R1", "R2"] and rs.rules[0].priority == 1
+    ns = {"主表.a": pd.Series(["x", "q", "q"], dtype=object), "主表.b": pd.Series([None, "y", "n"], dtype=object)}
+    res, hit = apply_rules(rs, ns, {})
+    assert res["标记"].tolist() == ["命中", "命中", "兜底"] and hit.tolist() == ["R1", "R1", "R2"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "msg"),
+    [
+        ([["R1", 1, "x", "-", "命中"], ["R1", None, "-", "y", "别的"]], "输出「标记」= 别的, 与首行"),
+        ([["R1", 1, "x", "-", "命中"], ["R1", 9, "-", "y", None]], "优先级与首行"),
+        ([["R1", 1, "x", "-", "命中"], ["R2", 2, "-", "-", "兜底"], ["R1", 3, "-", "y", "命中"]], "重复出现.*相邻"),
+    ],
+)
+def test_excel_continuation_row_errors(tmp_path, rows, msg):
+    with pytest.raises(ValueError, match=msg):
+        load_rules(make_workbook(tmp_path / "r.xlsx", [*HEADER, *rows]))
+
+
+def test_yaml_duplicate_id_and_test_guards(tmp_path):
+    p = tmp_path / "r.yaml"
+    p.write_text("规则:\n  - 编号: A\n    则: {y: 1}\n  - 编号: A\n    则: {y: 2}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="规则编号「A」重复"):
+        load_yaml_rules(p)
+    base = "规则:\n  - 编号: A\n    当: [x > 1]\n    则: {y: 1}\n测试:\n"
+    p.write_text(base, encoding="utf-8")
+    with pytest.raises(ValueError, match="没有任何用例"):
+        load_yaml_rules(p)
+    p.write_text(base + "  - 用例: T1\n    输入: {x: 2}\n    期望: {z: 1}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="测试用例「T1」: 期望列「z」不是输出列"):
+        load_yaml_rules(p)
+    p.write_text(base + "  - 用例: T1\n    输入: {本月.x: 2}\n    期望: {y: 1}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="测试用例「T1」: 输入列「本月.x」不是规则引用到的变量"):
+        load_yaml_rules(p)
 
 
 def test_missing_file_and_missing_sheet(tmp_path):

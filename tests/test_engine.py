@@ -176,6 +176,13 @@ def test_unique_policy_reports_label(ns_two_rows):
         apply_rules(rs, ns_two_rows, {}, labels=pd.Series(["C001", "C002", "C003"]))
 
 
+def test_duplicate_rule_ids_rejected(ns_two_rows):
+    # masks 按 ID 建字典, 重复 ID 会静默丢掉一条规则; 两个加载器都已拦截, 引擎再兜一层
+    rules = [Rule("R", 1, [], {"x": "a"}), Rule("R", 2, [], {"x": "b"})]
+    with pytest.raises(ValueError, match="规则 ID 重复: R"):
+        apply_rules(make_rs(rules, ["x"]), ns_two_rows, {})
+
+
 def test_unknown_variable_names_rule(ns_two_rows):
     r = Rule("R9", 1, [cell_condition("不存在的变量", "x")], {"x": "1"})
     with pytest.raises(KeyError, match="R9"):

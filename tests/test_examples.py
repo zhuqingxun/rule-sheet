@@ -37,7 +37,7 @@ def test_real_data_changes(rules_file, tmp_path):
     hits = dict(zip(res.out["客户编号"], res.out["命中规则"], strict=True))
     for cid, want in EXPECTED_HITS.items():
         assert hits[cid] == want, cid
-    assert hits["C008"] in ("R4; R5a", "R4; R5")
+    assert hits["C008"] == "R4; R5"  # Excel 里 R5 是两行同 ID, 审计列按一条规则记
     assert len(res.changed) == 5
     assert res.written is not None and res.written.exists()
     row = res.out.set_index("客户编号")
@@ -51,7 +51,8 @@ def test_real_data_changes(rules_file, tmp_path):
 def test_both_frontends_agree(tmp_path):
     a = run(EXCEL_RULES, output=tmp_path / "a.xlsx").out
     b = run(YAML_RULES, output=tmp_path / "b.xlsx").out
-    cols = ["客户编号", "状态", "电话", "复核标记", "备注", "提醒"]
+    # 不比 变更明细: 它的字段顺序跟着输出列顺序走, Excel 按表头、YAML 按 则: 首次出现, 两边不同
+    cols = ["客户编号", "状态", "电话", "复核标记", "备注", "提醒", "命中规则"]
     pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
 
 
@@ -71,15 +72,26 @@ def test_written_file_has_audit_columns(tmp_path):
 # 第二个样例 status-machine: 字段名含 - / 输出格 清空 / 命中策略 首次命中
 # ---------------------------------------------------------------------------
 
-STATUS_HITS = {"P001": "S1", "P002": "S2", "P003": "S3", "P004": "S4", "P005": "S1", "P006": "S4"}
+STATUS_HITS = {
+    "P001": "S1",
+    "P002": "S2",
+    "P003": "S3",  # 拟任人变了 (S3 第一个分支)
+    "P004": "S5",
+    "P005": "S1",
+    "P006": "S5",
+    "P007": "S3",  # 流程节点变了 (S3 第二个分支: Excel 的续行 / YAML 的 任一满足)
+    "P008": "S4",
+    "P009": "S3",  # 上期拟任人为空、本期有: 变量定义里显式写的那一支
+}
 
 
 @STATUS_FRONTENDS
 def test_status_embedded_cases_all_pass(rules_file):
     rs = load_rules(rules_file)
     assert rs.hit_policy == "首次命中"
+    assert [r.rule_id for r in rs.rules] == ["S1", "S2", "S3", "S4", "S5"]  # Excel 里 S3 占两行, 仍是一条规则
     outcomes = run_tests(rs)
-    assert len(outcomes) == 6
+    assert len(outcomes) == 10
     assert all(o.passed for o in outcomes), [(o.name, o.problems, o.error) for o in outcomes if not o.passed]
 
 
@@ -94,8 +106,11 @@ def test_status_real_data_first_match(rules_file, tmp_path):
     assert row.loc["P003", "状态-会议"] == "02-进展更新"
     assert row.loc["P004", "状态-会议"] == "01-新增"
     assert row.loc["P006", "状态-会议"] == "01-新增"
+    assert row.loc["P007", "状态-会议"] == "02-进展更新"
+    assert row.loc["P008", "状态-会议"] == "03-按计划进行"
+    assert row.loc["P009", "状态-会议"] == "02-进展更新"
     assert row.loc["P001", "变更明细"] == "状态-会议: 01-新增 -> 空"
-    assert len(res.changed) == 4
+    assert len(res.changed) == 7
     back = pd.read_excel(res.written)
     assert pd.isna(back.set_index("岗位编码").loc["P001", "状态-会议"])  # 写出的 Excel 里是真空白
 
@@ -113,12 +128,16 @@ def test_status_needs_first_match_not_priority():
     rs.hit_policy = "优先级"
     outcomes = {o.name: o for o in run_tests(rs)}
     t2 = next(o for name, o in outcomes.items() if name.startswith("T2"))
-    assert not t2.passed and t2.hit == "S2; S4" and t2.problems == ["状态-会议: 期望 空, 实际 01-新增"]
+    assert not t2.passed and t2.hit == "S2; S5" and t2.problems == ["状态-会议: 期望 空, 实际 01-新增"]
 
 
 def test_cli_run_and_test(tmp_path, capsys):
     assert cli.main(["test", str(YAML_RULES)]) == 0
     assert "8/8 通过" in capsys.readouterr().out
+    no_tests = tmp_path / "no_tests.yaml"
+    no_tests.write_text("规则:\n  - 则: {y: 1}\n", encoding="utf-8")
+    assert cli.main(["test", str(no_tests)]) == 1  # 没有用例 = 什么都没验证, 不能算通过
+    assert "没有测试用例" in capsys.readouterr().out
     assert cli.main([str(EXCEL_RULES), "--output", str(tmp_path / "o.xlsx")]) == 0  # 省略 run 子命令
     out = capsys.readouterr().out
     assert "5 行发生变更" in out and "已写出" in out
