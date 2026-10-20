@@ -79,7 +79,8 @@ def test_null_tests():
 
 
 def test_null_keyword_in_cells():
-    """单元格里 空 / = 空 / != 空 就是判空, 和 为空 / 非空 同义; 空 不是值, 大小比较和区间端点报错; 文字「空」加引号。"""
+    """单元格里 空 / = 空 / != 空 就是判空 (与 为空 / 非空 同义)。
+    空 不是值: 大小比较和区间端点报错; 要匹配文字「空」加引号。"""
     var = s("a", None, "")
     assert hits("空", var) == [False, True, False]
     assert hits("= 空", var) == [False, True, False]
