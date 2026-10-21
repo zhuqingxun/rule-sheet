@@ -1,7 +1,3 @@
-# /// script
-# requires-python = ">=3.11"
-# dependencies = ["openpyxl>=3.1"]
-# ///
 """生成「岗位上会状态」样例: 两份数据 + Excel 决策表, 全部写到本脚本所在目录。
 
 这个样例展示 customer-sync 里没有的几件事:
@@ -14,9 +10,10 @@
     - 判空统一写 `= 空` / `!= 空` (单元格) 与 `x == 空` / `x != 空` (表达式); `为空` / `非空` 是同义写法
     - 「测试」sheet 的表头直接从第 1 行开始 (表头位置按内容识别, 不固定行号)
 
-运行 (任选其一):
-    uv run --script examples/status-machine/make_samples.py
+运行:
     uv run python examples/status-machine/make_samples.py
+
+这里只写内容; 颜色 / 列宽 / 换行 / 冻结等版式统一由 rule_sheet.style 套用 (与 `rule-sheet format` 同一套规范)。
 
 产物:
     本期岗位.xlsx      被更新的主表 (规则里叫 本期)
@@ -25,56 +22,24 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
+
+from rule_sheet.style import style_data_sheet, style_rules_workbook
 
 ROOT = Path(__file__).resolve().parent
 
-FILL_BY_KIND = {
-    "输入": "DDEBF7",   # 浅蓝: 业务人员改的条件格
-    "输出": "E2EFDA",   # 浅绿: 命中后写回的值
-    "期望": "E2EFDA",
-    "说明": "FFF2CC",   # 浅黄: 纯注释
-    "规则ID": "EDEDED",
-    "优先级": "EDEDED",
-    "用例": "EDEDED",
-}
-THIN = Side(style="thin", color="BFBFBF")
-BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-BOLD = Font(bold=True)
 
-
-def put(ws: Worksheet, row: int, col: int, value: Any, *, bold: bool = False, fill: str | None = None) -> None:
-    cell = ws.cell(row=row, column=col, value=value)
-    if isinstance(value, str) and value.startswith("="):
-        cell.data_type = "s"  # 以 = 开头的 rule-sheet 表达式按文本写, 否则 openpyxl / Excel 会当成公式
-        cell.number_format = "@"
-    cell.border = BORDER
-    cell.alignment = Alignment(vertical="center")
-    if bold:
-        cell.font = BOLD
-    if fill:
-        cell.fill = PatternFill("solid", fgColor=fill)
-
-
-def set_widths(ws: Worksheet, widths: list[int]) -> None:
-    for i, w in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-
-
-def write_data_sheet(ws: Worksheet, header: list[str], rows: list[list[Any]], widths: list[int]) -> None:
-    for c, name in enumerate(header, start=1):
-        put(ws, 1, c, name, bold=True, fill="D9D9D9")
-    for r, row in enumerate(rows, start=2):
-        for c, val in enumerate(row, start=1):
-            put(ws, r, c, val)
-    ws.freeze_panes = "A2"
-    set_widths(ws, widths)
+def new_sheet(wb: Workbook, title: str, rows: Iterable[Iterable[Any]], *, first: bool = False) -> Worksheet:
+    ws = wb.active if first else wb.create_sheet()
+    ws.title = title
+    for row in rows:
+        ws.append(list(row))
+    return ws
 
 
 # ---------------------------------------------------------------------------
@@ -110,87 +75,36 @@ PREVIOUS_ROWS = [
 
 def build_data() -> None:
     wb = Workbook()
-    ws = wb.active
-    ws.title = "本期岗位"
-    write_data_sheet(ws, CURRENT_HEADER, CURRENT_ROWS, widths=[10, 16, 24, 14, 10, 12])
+    style_data_sheet(new_sheet(wb, "本期岗位", [CURRENT_HEADER, *CURRENT_ROWS], first=True))
     wb.save(ROOT / "本期岗位.xlsx")
 
     wb = Workbook()
-    ws = wb.active
-    ws.title = "上期岗位"
-    write_data_sheet(ws, PREVIOUS_HEADER, PREVIOUS_ROWS, widths=[10, 24, 14, 10, 12])
+    style_data_sheet(new_sheet(wb, "上期岗位", [PREVIOUS_HEADER, *PREVIOUS_ROWS], first=True))
     wb.save(ROOT / "上期岗位.xlsx")
 
 
 # ---------------------------------------------------------------------------
 # 规则工作簿
 # ---------------------------------------------------------------------------
-def write_kv_sheet(ws: Worksheet, title: tuple[str, str, str], rows: list[tuple[Any, Any, Any]],
-                   widths: list[int]) -> None:
-    for c, name in enumerate(title, start=1):
-        put(ws, 1, c, name, bold=True, fill="D9D9D9")
-    for r, (k, v, note) in enumerate(rows, start=2):
-        put(ws, r, 1, k, bold=True)
-        put(ws, r, 2, v)
-        put(ws, r, 3, note, fill=FILL_BY_KIND["说明"])
-    set_widths(ws, widths)
-
-
-def write_table_sheet(ws: Worksheet, header: tuple[str, ...], rows: list[tuple[Any, ...]], widths: list[int]) -> None:
-    """第 1 行列名, 之后一行一条记录 (「输入」sheet 用)。"""
-    for c, name in enumerate(header, start=1):
-        put(ws, 1, c, name, bold=True, fill="D9D9D9")
-    for r, row in enumerate(rows, start=2):
-        for c, val in enumerate(row, start=1):
-            put(ws, r, c, val, bold=(c == 1), fill=FILL_BY_KIND["说明"] if header[c - 1] == "说明" else None)
-    set_widths(ws, widths)
-
-
-def write_rule_table(ws: Worksheet, top_note: list[Any] | None, kinds: list[str], names: list[str],
-                     rows: list[list[Any]], widths: list[int]) -> int:
-    """表头两行 (列类型 / 列名), 之前可以有一行元信息 (命中策略 / 说明); 表头之后每行一条规则。返回正文起始行号。"""
-    start = 1
-    if top_note:
-        for c, val in enumerate(top_note, start=1):
-            put(ws, 1, c, val, bold=(c == 1), fill=FILL_BY_KIND["说明"] if c == 3 else None)
-        start = 2
-    for c, (kind, name) in enumerate(zip(kinds, names, strict=True), start=1):
-        fill = FILL_BY_KIND.get(kind)
-        put(ws, start, c, kind, bold=True, fill=fill)
-        put(ws, start + 1, c, name, bold=True, fill=fill)
-    body = start + 2
-    for r, row in enumerate(rows, start=body):
-        for c, val in enumerate(row, start=1):
-            kind = kinds[c - 1]
-            fill = FILL_BY_KIND.get(kind) if kind in ("输入", "输出", "期望") else None
-            put(ws, r, c, val, fill=fill)
-            horizontal = "center" if kind in ("输入", "规则ID", "优先级", "用例") else "left"
-            ws.cell(row=r, column=c).alignment = Alignment(horizontal=horizontal, vertical="center")
-    ws.freeze_panes = f"C{body}"
-    set_widths(ws, widths)
-    return body
-
-
 def build_rules() -> None:
     wb = Workbook()
 
     # ---- sheet 1: 输入 (形参: 名称 + 怎么对齐到主表; 文件只是默认绑定, 命令行 -i 可覆盖) ----
-    ws = wb.active
-    ws.title = "输入"
-    write_table_sheet(ws, ("名称", "匹配", "重复键", "文件", "说明"), [
+    new_sheet(wb, "输入", [
+        ("名称", "匹配", "重复键", "文件", "说明"),
         ("本期", "主表", None, "本期岗位.xlsx", "被更新的表: 输出的行就是它的行。规则里引用它的列写 本期.类别-会议"),
         ("上期", "岗位编码", "取第一条", "上期岗位.xlsx", "参照表, 按 岗位编码 对齐到主表; 引用写 上期.类别-会议, 上期.存在 = 是否匹配到"),
-    ], widths=[10, 14, 10, 24, 70])
+    ], first=True)
 
     # ---- sheet 2: 设置 (可选) ------------------------------------------------
-    ws = wb.create_sheet("设置")
-    write_kv_sheet(ws, ("设置项", "值", "说明"), [
+    new_sheet(wb, "设置", [
+        ("设置项", "值", "说明"),
         ("输出", "output/本期岗位_更新后.xlsx", "默认输出路径, 命令行 -o 可覆盖; 不写则是 output/<主表文件名>_更新后.xlsx"),
-    ], widths=[14, 32, 60])
+    ])
 
     # ---- sheet 3: 变量定义 --------------------------------------------------
-    ws = wb.create_sheet("变量定义")
-    write_kv_sheet(ws, ("变量", "定义", "说明"), [
+    new_sheet(wb, "变量定义", [
+        ("变量", "定义", "说明"),
         ("拟任人有变化", "本期.拟任人 != 上期.拟任人 或 (上期.拟任人 == 空 且 本期.拟任人 != 空)",
          "!= 两侧有空值就不成立 (和单元格一样), 所以「上期没填、本期填了」要单独写一支; == 空 / != 空 就是判空"),
         ("流程节点有变化", "本期.流程节点 != 上期.流程节点 或 (上期.流程节点 == 空 且 本期.流程节点 != 空)",
@@ -201,10 +115,9 @@ def build_rules() -> None:
         ("可用函数", None,
          "abs  round  天数差(晚, 早)  非空(x)  为空(x)  属于(x, 值1, ...)  "
          "包含 / 不包含 / 开头是 / 开头不是 / 结尾是 / 结尾不是 (x, 文本1, ...)  拼接(a, b, ...)  数字(x)  如果(条件, 真值, 假值)"),
-    ], widths=[16, 70, 60])
+    ])
 
-    # ---- sheet 4: 决策表 ----------------------------------------------------
-    ws = wb.create_sheet("决策表")
+    # ---- sheet 4: 决策表 (第 1 行元信息, 第 2 行列类型, 第 3 行列名, 第 4 行起每行一条规则) ----
     kinds = ["规则ID", "优先级", "输入", "输入", "输入", "输入", "输出", "说明"]
     names = ["规则ID", "优先级", "本期.类别-会议", "上期.类别-会议", "拟任人有变化", "流程节点有变化", "状态-会议", "说明"]
     rules = [
@@ -215,18 +128,15 @@ def build_rules() -> None:
         ["S4", 4,    "-",    "= 本期.类别-会议", "-", "-", "03-按计划进行", "类别与上期相同, 没有变化"],
         ["S5", 5,    "-",    "-",              "-", "-", "01-新增",     "兜底: 前面都没命中的行 (有类别、不是酝酿、与上期不同) 都是新增"],
     ]
-    body = write_rule_table(
-        ws,
-        top_note=["命中策略", "首次命中", "每行只听优先级数字最小的那条命中规则, 命中即停; 同优先级按行序。输出格 清空 = 写成空值, - = 不改"],
-        kinds=kinds, names=names, rows=rules,
-        widths=[8, 8, 22, 18, 14, 16, 14, 70],
-    )
-    s3 = body + 2  # S3 的两行: 合并 规则ID 与 优先级, 视觉上就是一条规则
+    ws = new_sheet(wb, "决策表", [
+        ["命中策略", "首次命中", "每行只听优先级数字最小的那条命中规则, 命中即停; 同优先级按行序。输出格 清空 = 写成空值, - = 不改"],
+        kinds, names, *rules,
+    ])
+    s3 = 4 + 2  # 正文从第 4 行起, S3 是第 3 条: 合并 规则ID 与 优先级 两格, 视觉上就是一条规则
     ws.merge_cells(start_row=s3, start_column=1, end_row=s3 + 1, end_column=1)
     ws.merge_cells(start_row=s3, start_column=2, end_row=s3 + 1, end_column=2)
 
     # ---- sheet 5: 测试 (表头直接从第 1 行开始, 表头位置按内容识别) --------------
-    ws = wb.create_sheet("测试")
     kinds = ["用例", "输入", "输入", "输入", "输入", "输入", "输入", "输入", "期望", "说明"]
     names = ["用例", "本期.类别-会议", "本期.状态-会议", "上期.类别-会议",
              "本期.拟任人", "上期.拟任人", "本期.流程节点", "上期.流程节点", "状态-会议", "说明"]
@@ -242,13 +152,9 @@ def build_rules() -> None:
         ["T9",  NOTICE, "01-新增",    NOTICE, "赵六", None,   None,      None,      "02-进展更新",   "上期拟任人为空、本期有 = 新任命, 算变化 (变量定义里显式写的那一支)"],
         ["T10", NOTICE, "01-新增",    NOTICE, None,   None,   "部门评审", "部门评审", "03-按计划进行", "两期拟任人都空不算变化: != 两侧有空值就不成立, 决策表与 YAML 一致"],
     ]
-    write_rule_table(
-        ws,
-        top_note=None,
-        kinds=kinds, names=names, rows=tests,
-        widths=[6, 22, 14, 22, 10, 10, 12, 12, 14, 64],
-    )
+    new_sheet(wb, "测试", [kinds, names, *tests])
 
+    style_rules_workbook(wb)
     wb.save(ROOT / "规则_决策表.xlsx")
 
 

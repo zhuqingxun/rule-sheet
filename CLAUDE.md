@@ -19,7 +19,8 @@ uv 项目, src 布局, `rule-sheet` 命令, pytest 套件。2026-10-19 从 `D:/C
 | `src/rule_sheet/conditions.py` | 单元格一元测试 `unary_test`、YAML 组合词 `build_condition`、输出格 `resolve_output` |
 | `src/rule_sheet/loaders.py` | `load_excel_rules` / `load_yaml_rules` -> `RuleSet` |
 | `src/rule_sheet/engine.py` | `build_namespace` / `apply_rules` / `run_tests` / `run` 整体流程 / 写出 |
-| `src/rule_sheet/cli.py` | `rule-sheet run|test` |
+| `src/rule_sheet/style.py` | 规则工作簿的版式规范 (列类型配色 / 列宽区间 / 换行行高 / 冻结 / `=` 格存文本), `style_rules_workbook` 给样例生成脚本用, `format_workbook` 给 `rule-sheet format` 用; 表头定位复用 `loaders._parse_header` |
+| `src/rule_sheet/cli.py` | `rule-sheet run|test|format` |
 | `examples/customer-sync/` | 自带样例: 两份数据 + 决策表 + YAML + Gherkin + 生成脚本 (逐列合并的 `优先级` 策略) |
 | `examples/status-machine/` | 第二个样例: 字段名含 `-` / 输出格 `清空` / 命中策略 `首次命中` (2026-10-19 为 issue #1-#4 加); 0.3 (issue #5-#8) 扩成: 决策表同 ID 续行表达跨变量 OR、变量定义里 `且` / `或`、测试 sheet 表头从第 1 行开始 |
 | `examples/position-tags/` | 第三个样例 (0.6, issue #9-#16): 多标签分类, 命中策略 `多条拼接`、单元格文本关键字 `包含` / `不包含` / `开头是`、清单文件当参照表 (`关键岗位清单.存在`)、`数字()` / `N天` / `如果()` / `拼接()` |
@@ -35,9 +36,10 @@ uv run pytest
 uv run pytest tests/test_examples.py::test_both_frontends_agree   # 单个用例
 uv run pytest -k excel                                            # 按名字筛选 (参数化 id 为 excel / yaml)
 uv run ruff check . ; uv run ruff format --check .
-uv run --script examples/customer-sync/make_samples.py     # 改了样例设计后重新生成 xlsx
-uv run --script examples/status-machine/make_samples.py    # 第二个样例同理
-uv run --script examples/position-tags/make_samples.py     # 第三个样例同理
+uv run python examples/customer-sync/make_samples.py       # 改了样例设计后重新生成 xlsx (脚本 import rule_sheet.style, 不能用 --script 隔离环境跑)
+uv run python examples/status-machine/make_samples.py      # 第二个样例同理
+uv run python examples/position-tags/make_samples.py       # 第三个样例同理
+uv run rule-sheet format examples/customer-sync/规则_决策表.xlsx   # 按版式规范重排任意规则工作簿 (原地)
 ```
 
 验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 7 行变更 / 10 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败; position-tags 8 行变更 / 8 条内嵌用例, 每行的 命中规则 / 标签 / 显示名 都有预期值)。改解释器语义后必须跑全量, 不要只跑一个前端。
@@ -77,6 +79,7 @@ uv run --script examples/position-tags/make_samples.py     # 第三个样例同�
 
 - 中文 DSL 关键词是产品的一部分, 改名需同步 README 速查表、样例文件、`tests/test_unary.py`; 加内置函数要同步三个样例「变量定义」sheet 的「可用函数」提示行并重新生成 xlsx
 - 样例数据的每一行对应一种规则情形 (见 README「样例数据设计」), 加规则时同步加数据行、Excel 测试 sheet 用例、YAML 测试用例, 并重新生成 xlsx
+- 版式只在 `style.py` 一处定义 (`FILLS` / `WIDTH_BOUNDS` / `KV_WIDTH_BOUNDS` 等), 生成脚本里不写颜色和列宽; 改规范要同步 `docs/使用指南.md` 3.6 的表并重新生成三个样例 (`tests/test_style.py` 对照常量校验样例)
 - 生成的 xlsx 进 git (体积小, 便于直接打开看), `examples/*/output/` 不进
 - 版本号在 `pyproject.toml` 与 `src/rule_sheet/__init__.py` 两处, 同步改
 - `examples/**` 被 ruff format 排除并忽略 E501: `make_samples.py` 里的规则表是手工按列对齐的, 不要去「修」它的格式

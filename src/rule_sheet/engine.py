@@ -30,6 +30,7 @@ from .model import (
     Rule,
     RuleSet,
 )
+from .style import display_width
 
 Mask = pd.Series
 
@@ -345,7 +346,7 @@ def write_xlsx_safely(df: pd.DataFrame, path: Path) -> Path:
                 df.to_excel(xw, index=False)
                 ws = xw.sheets[next(iter(xw.sheets))]
                 for i, col in enumerate(df.columns, start=1):
-                    width = max([len(str(col))] + [len(str(v)) for v in df[col].head(50)]) * 1.6 + 2
+                    width = max([display_width(col)] + [display_width(v) for v in df[col].head(50)]) + 2
                     ws.column_dimensions[get_column_letter(i)].width = min(max(width, 8), 60)
                     if pd.api.types.is_datetime64_any_dtype(df[col]):
                         for r in range(2, len(df) + 2):

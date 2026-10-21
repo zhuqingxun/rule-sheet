@@ -16,6 +16,7 @@ uv run rule-sheet run  examples/customer-sync/rules.yaml         # 同一组规�
 uv run rule-sheet test examples/customer-sync/rules.yaml         # 只跑规则文件内嵌的测试用例
 uv run rule-sheet run  examples/status-machine/rules.yaml -i 本期=本期岗位_2026-10.xlsx -i 上期=上期岗位_2026-09.xlsx -o 结果.xlsx
 uv run rule-sheet run  examples/position-tags/rules.yaml         # 第三个样例: 多标签分类 (多条拼接 / 文本关键字 / 清单当参照表)
+uv run rule-sheet format 规则.xlsx                                # 按版式规范重排规则工作簿 (颜色 / 列宽 / 换行 / 冻结)
 uv run pytest                                                    # 项目测试套件
 ```
 
@@ -81,6 +82,8 @@ uv run pytest                                                    # 项目测试�
 
 这个分层是 DMN 的核心思想: 复杂表达式写一次放「变量定义」, 决策表单元格里只允许少数几种形态。
 
+版式 (列类型配色、列宽区间、换行、冻结) 是一套固定规范, 定义在 `rule_sheet/style.py`, 样例由它生成, 业务人员改乱了用 `rule-sheet format 规则.xlsx` 一键恢复; 规范的表见使用指南 3.6。
+
 决策表和测试 sheet 的表头都是两行: 列类型行 (`规则ID` / `优先级` / `输入` / `输出` / `说明`; 测试 sheet 是 `用例` / `输入` / `期望` / `说明`) 加列名行。表头按内容识别 (写着 `规则ID` / `用例` 的那一行), 不固定在第几行, 前面可以放命中策略和说明, 也可以什么都不放。列类型拼错、列名漏写、测试的期望列不是输出列、输入列不是规则用到的变量, 都在加载时报错, 不会静默变成「不关心」或「假通过」。
 
 ## 单元格语法速查
@@ -137,6 +140,7 @@ src/rule_sheet/
   conditions.py   单元格一元测试、YAML 条件组合、输出格解析
   loaders.py      Excel 决策表 / YAML 两种前端 -> RuleSet
   engine.py       合并两表、派生变量、命中策略合并、审计列、内嵌测试、写出
+  style.py        规则工作簿的版式规范 (配色 / 列宽 / 换行 / 冻结), 样例生成与 rule-sheet format 共用
   cli.py          rule-sheet 命令
 examples/customer-sync/   自带样例 (数据 + 三种写法的规则)
 examples/status-machine/  第二个样例: 字段名含 - / 输出格 清空 / 命中策略 首次命中

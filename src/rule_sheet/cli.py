@@ -1,7 +1,8 @@
 """命令行入口。
 
-rule-sheet run  <规则文件> [-i 名称=路径[#sheet]]... [-o 输出路径] [--base-dir DIR] [--ignore-tests] [--dry-run]
-rule-sheet test <规则文件>
+rule-sheet run    <规则文件> [-i 名称=路径[#sheet]]... [-o 输出路径] [--base-dir DIR] [--ignore-tests] [--dry-run]
+rule-sheet test   <规则文件>
+rule-sheet format <规则.xlsx> [-o 路径]      按版式规范重排 Excel 规则工作簿 (颜色 / 列宽 / 换行 / 冻结)
 rule-sheet <规则文件>            等价于 run
 
 规则文件声明输入 (形参), 命令行用 -i 把文件绑定上去 (实参); 规则文件里写了默认文件的可以不给。
@@ -16,8 +17,9 @@ from pathlib import Path
 from . import __version__
 from .engine import RunResult, TestOutcome, run, run_tests
 from .loaders import load_rules
+from .style import format_workbook
 
-SUBCOMMANDS = {"run", "test"}
+SUBCOMMANDS = {"run", "test", "format"}
 
 
 def _print_tests(outcomes: list[TestOutcome]) -> None:
@@ -92,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_test = sub.add_parser("test", help="只跑规则文件内嵌的测试用例, 不读数据表")
     p_test.add_argument("rules", type=Path, help="规则文件: .xlsx 决策表 或 .yaml")
+
+    p_fmt = sub.add_parser("format", help="按版式规范重排 Excel 规则工作簿 (颜色 / 列宽 / 换行 / 冻结), 默认原地改写")
+    p_fmt.add_argument("rules", type=Path, help="规则工作簿 (.xlsx)")
+    p_fmt.add_argument("-o", "--output", type=Path, help="写到另一个文件, 不动原文件")
     return parser
 
 
@@ -103,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
         args.insert(0, "run")  # rule-sheet <规则文件> 等价于 run
     ns = build_parser().parse_args(args)
     try:
+        if ns.command == "format":
+            print(f"已格式化: {format_workbook(ns.rules, ns.output)}")
+            return 0
         if ns.command == "test":
             rs = load_rules(ns.rules)
             if not rs.tests:
