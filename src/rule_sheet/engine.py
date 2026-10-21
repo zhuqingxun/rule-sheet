@@ -343,6 +343,14 @@ def run_tests(rs: RuleSet) -> list[TestOutcome]:
 # ---------------------------------------------------------------------------
 
 
+def _is_date_column(s: pd.Series) -> bool:
+    """日期列: datetime 类型, 或 (规则写过之后变成 object 的) 非空值全是日期的列。"""
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return True
+    values = [v for v in s.tolist() if not is_na(v)]
+    return bool(values) and all(isinstance(v, (pd.Timestamp, datetime, date)) for v in values)
+
+
 def write_xlsx_safely(df: pd.DataFrame, path: Path) -> Path:
     """目标被 Excel 占用时自动换 _v2/_v3 后缀, 不中断。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,7 +363,7 @@ def write_xlsx_safely(df: pd.DataFrame, path: Path) -> Path:
                 for i, col in enumerate(df.columns, start=1):
                     width = max([display_width(col)] + [display_width(v) for v in df[col].head(50)]) + 2
                     ws.column_dimensions[get_column_letter(i)].width = min(max(width, 8), 60)
-                    if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    if _is_date_column(df[col]):
                         for r in range(2, len(df) + 2):
                             ws.cell(row=r, column=i).number_format = "yyyy-mm-dd"
                 ws.freeze_panes = "B2"
@@ -428,6 +436,12 @@ def run(
     bound = bind_inputs(rs, base, inputs)
     tables = {name: read_table(p, sheet) for name, (p, sheet) in bound.items()}
     primary_df = tables[rs.primary.name]
+    clash = [g for g in rs.field_groups if g in primary_df.columns]
+    if clash:  # 组名在决策表里占一个输出列的位置, 加载时已展开成逐列; 主表真有同名列的话那一列永远写不到, 不能静默
+        raise ValueError(
+            f"字段组「{clash[0]}」与主表「{rs.primary.name}」的列同名; "
+            f"组名只是决策表里的列名, 不能和真实的列撞名, 换个组名"
+        )
 
     notes: list[str] = []
     ns = build_namespace(rs, tables, notes)

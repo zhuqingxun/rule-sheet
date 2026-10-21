@@ -161,8 +161,10 @@ def test_join_policy_validation(tmp_path):
 INPUTS = [["名称", "匹配", "文件"], ["主表", "主表", "a.xlsx"], ["本月", "k", "b.xlsx"]]
 
 
-def make_workbook(path, decision, tests=None, derived=None, merges=(), inputs=None, settings=None):
-    """最小规则工作簿: decision / tests / inputs 是整张 sheet 的行 (含表头), merges 是决策表里要合并的区域。"""
+def make_workbook(
+    path, decision, tests=None, derived=None, merges=(), inputs=None, settings=None, groups=None, groups_header=None
+):
+    """最小规则工作簿: decision / tests / inputs 是整张 sheet 的行 (含表头), groups 不含表头, merges 是要合并的区域。"""
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -179,6 +181,11 @@ def make_workbook(path, decision, tests=None, derived=None, merges=(), inputs=No
         ws = wb.create_sheet("变量定义")
         ws.append(["变量", "定义"])
         for row in derived:
+            ws.append(list(row))
+    if groups is not None:
+        ws = wb.create_sheet("字段组")
+        ws.append(list(groups_header or ["名称", "列名"]))
+        for row in groups:
             ws.append(list(row))
     ws = wb.create_sheet("决策表")
     for row in decision:
@@ -335,6 +342,90 @@ def test_yaml_duplicate_id_and_test_guards(tmp_path):
     p.write_text(base + "  - 用例: T1\n    输入: {本月.x: 2}\n    期望: {y: 1}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="测试用例「T1」: 输入列「本月.x」不是规则引用到的变量"):
         load_yaml_rules(p)
+
+
+# ---------------------------------------------------------------------------
+# 字段组: 组名当输出列, 一格表达整组复制 / 整组清空; 加载时展开成逐列, 引擎不知道有字段组
+# ---------------------------------------------------------------------------
+
+GROUP_DECISION = [
+    ["规则ID", "输入", "输出", "输出"],
+    ["规则ID", "主表.a", "带入", "y"],
+    ["R1", "x", "本月", "-"],  # 整组从 本月 复制
+    ["R2", "q", "本月", "=主表.a"],  # 显式写的 y 优先于字段组里的 y
+    ["R3", "z", "清空", "-"],  # 整组清空
+    ["R4", "w", "-", 1],  # 字段组格留空 = 整组不改
+]
+
+
+def test_excel_field_groups_expand_to_columns(tmp_path):
+    from rule_sheet.engine import apply_rules
+
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", GROUP_DECISION, groups=[["带入", "x, y, z"]]))
+    assert rs.field_groups == {"带入": ["x", "y", "z"]} and rs.outputs == ["x", "y", "z"]
+    assert [r.outputs for r in rs.rules] == [
+        {"x": "本月.x", "y": "本月.y", "z": "本月.z"},
+        {"x": "本月.x", "y": "=主表.a", "z": "本月.z"},
+        {"x": "清空", "y": "清空", "z": "清空"},
+        {"y": 1},
+    ]
+    assert rs.variables == ["主表.a", "本月.x", "本月.y", "本月.z"]  # 展开出来的 本月.x 也进变量清单, 用例能给值
+    idx = pd.RangeIndex(4)
+    ns = {
+        "主表.a": pd.Series(["x", "q", "z", "w"], index=idx, dtype=object),
+        "本月.x": pd.Series([1, 2, 3, 4], index=idx),
+        "本月.y": pd.Series([5, 6, 7, 8], index=idx),
+        "本月.z": pd.Series([9, 10, 11, 12], index=idx),
+    }
+    originals = {c: pd.Series([0] * 4, index=idx, dtype=object) for c in rs.outputs}
+    res, hits = apply_rules(rs, ns, originals)
+    assert hits.tolist() == ["R1", "R2", "R3", "R4"]
+    assert res["x"].tolist() == [1, 2, None, 0] and res["z"].tolist() == [9, 10, None, 0]
+    assert res["y"].tolist() == [5, "q", None, 1]
+
+
+def test_yaml_field_groups(tmp_path):
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "输入:\n  主表: {匹配: 主表}\n  本月: {匹配: k}\n"
+        "字段组:\n  带入: [x, y]\n  另一组: a, b\n"  # 列表或逗号分隔的字符串都认
+        "规则:\n  - 编号: R1\n    则: {带入: 本月, y: 2}\n  - 编号: R2\n    则: {另一组: 清空, 带入: '-'}\n",
+        encoding="utf-8",
+    )
+    rs = load_yaml_rules(p)
+    assert rs.field_groups == {"带入": ["x", "y"], "另一组": ["a", "b"]}
+    assert rs.rules[0].outputs == {"x": "本月.x", "y": 2} and rs.rules[1].outputs == {"a": "清空", "b": "清空"}
+    assert rs.outputs == ["x", "y", "a", "b"] and "本月.x" in rs.variables
+    p.write_text("字段组: {带入: 5}\n规则: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="「带入」的值要是列名清单"):
+        load_yaml_rules(p)
+
+
+BAD_GROUP_CELL = [*GROUP_DECISION[:2], ["R1", "x", "上月", "-"]]  # 上月 不是输入名
+JOIN_GROUP = [["命中策略", "多条拼接"], *GROUP_DECISION]  # R3 整组清空, 在 多条拼接 下没有意义
+
+
+@pytest.mark.parametrize(
+    ("groups", "header", "decision", "msg"),
+    [
+        (
+            [["带入", "x, y"]],
+            None,
+            BAD_GROUP_CELL,
+            "规则 R1 \\(第 3 行\\) 输出「带入」= 上月: 字段组格只能写一个输入名",
+        ),
+        ([["带入", ""]], None, GROUP_DECISION, "字段组「带入」没有列"),
+        ([["带入", "x, x"]], None, GROUP_DECISION, "字段组「带入」里的列「x」重复"),
+        ([["带入", "x"], ["带入", "y"]], None, GROUP_DECISION, "字段组「带入」重复"),
+        ([["本月", "x"]], None, GROUP_DECISION, "字段组「本月」与输入名重复"),
+        ([["带入", "x, 带入"]], None, GROUP_DECISION, "字段组名「带入」同时是某个字段组里的列名"),
+        ([["带入", "x"]], ["名称", "字段"], GROUP_DECISION, "「字段组」sheet 第 1 行缺少「列名」列"),
+        ([["带入", "x, y"]], None, JOIN_GROUP, "规则 R3 输出「x」= 清空: 命中策略 多条拼接"),
+    ],
+)
+def test_field_group_errors(tmp_path, groups, header, decision, msg):
+    with pytest.raises(ValueError, match=msg):
+        load_rules(make_workbook(tmp_path / "r.xlsx", decision, groups=groups, groups_header=header))
 
 
 # ---------------------------------------------------------------------------

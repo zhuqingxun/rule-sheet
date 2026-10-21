@@ -15,7 +15,19 @@ from rule_sheet.expressions import eval_expr
 from rule_sheet.loaders import load_rules
 from rule_sheet.model import InputSpec, RuleSet
 
-from .conftest import EXCEL_RULES, STATUS_DIR, STATUS_EXCEL, STATUS_YAML, TAGS_DIR, TAGS_EXCEL, TAGS_YAML, YAML_RULES
+from .conftest import (
+    CARRY_DIR,
+    CARRY_EXCEL,
+    CARRY_YAML,
+    EXCEL_RULES,
+    STATUS_DIR,
+    STATUS_EXCEL,
+    STATUS_YAML,
+    TAGS_DIR,
+    TAGS_EXCEL,
+    TAGS_YAML,
+    YAML_RULES,
+)
 
 SAMPLES = pytest.mark.parametrize(
     ("excel", "yaml_file", "data_dir"),
@@ -23,8 +35,9 @@ SAMPLES = pytest.mark.parametrize(
         (EXCEL_RULES, YAML_RULES, EXCEL_RULES.parent),
         (STATUS_EXCEL, STATUS_YAML, STATUS_DIR),
         (TAGS_EXCEL, TAGS_YAML, TAGS_DIR),
+        (CARRY_EXCEL, CARRY_YAML, CARRY_DIR),
     ],
-    ids=["customer", "status", "tags"],
+    ids=["customer", "status", "tags", "carry"],
 )
 
 
@@ -340,6 +353,46 @@ def test_yaml_to_excel_keeps_continuation_rows_merged(tmp_path):
     assert merged == {"A6:A7", "B6:B7"}  # S3 的 任一满足 两支 -> 两行, 规则ID / 优先级 合并
     assert [ws.cell(r, 1).value for r in range(4, 10)] == ["S1", "S2", "S3", None, "S4", "S5"]
     assert ws.cell(6, 3).value == "= 上期.类别-会议" or ws.cell(6, 4).value == "= 上期.类别-会议"
+
+
+def test_field_groups_survive_both_directions_and_diff(tmp_path):
+    """导出保留字段组的形态 (字段组: 键 + 则: 里的 组名: 输入名), YAML -> Excel 生成「字段组」sheet, diff 比字段组。"""
+    text = excel_to_yaml(CARRY_EXCEL)
+    assert "字段组:\n  会议记录: [例会时间, 类别-会议, 状态-会议, 例会结论, 备注, 待跟进事宜]\n" in text
+    assert (
+        "会议记录: 上期" in text and "例会结论: 上期.例会结论" not in text
+    )  # 则: 里不展开 (用例输入里当然有 上期.例会结论)
+    out = export_workbook(CARRY_YAML, tmp_path / "c.xlsx")
+    wb = load_workbook(out)
+    assert wb.sheetnames == ["输入", "设置", "字段组", "决策表", "测试"]
+    assert [wb["字段组"].cell(2, c).value for c in (1, 2)] == [
+        "会议记录",
+        "例会时间, 类别-会议, 状态-会议, 例会结论, 备注, 待跟进事宜",
+    ]
+    ws = wb["决策表"]
+    names = [ws.cell(3, c).value for c in range(1, ws.max_column + 1)]
+    assert names[names.index("会议记录") - 1] == "上期.状态-会议" and names[-4:] == [
+        "会议记录",
+        "例会时间",
+        "状态-会议",
+        "说明",
+    ]
+    assert (
+        ws.cell(4, names.index("会议记录") + 1).value == "上期"
+        and ws.cell(5, names.index("会议记录") + 1).value is None
+    )
+    tests_ws = wb["测试"]
+    expects = [
+        tests_ws.cell(2, c).value for c in range(1, tests_ws.max_column + 1) if tests_ws.cell(1, c).value == "期望"
+    ]
+    assert expects == ["例会时间", "类别-会议", "状态-会议", "例会结论", "备注", "待跟进事宜"]  # 期望列是展开后的逐列
+    p = tmp_path / "g.yaml"
+    p.write_text(
+        CARRY_YAML.read_text(encoding="utf-8").replace(", 待跟进事宜]", ", 待跟进事宜, 岗位名称]"), encoding="utf-8"
+    )
+    res = diff_rules(CARRY_EXCEL, p)
+    assert any(d.startswith("字段组不同") for d in res.differences)
+    assert any("规则 R1 输出" in d and "上期.岗位名称" in d for d in res.differences)  # 展开后的逐列输出也跟着不同
 
 
 def test_yaml_outside_subset_reports_rule(tmp_path):

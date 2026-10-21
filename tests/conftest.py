@@ -13,6 +13,9 @@ STATUS_YAML = STATUS_DIR / "rules.yaml"
 TAGS_DIR = EXAMPLES / "position-tags"
 TAGS_EXCEL = TAGS_DIR / "规则_决策表.xlsx"
 TAGS_YAML = TAGS_DIR / "rules.yaml"
+CARRY_DIR = EXAMPLES / "carry-forward"
+CARRY_EXCEL = CARRY_DIR / "规则_决策表.xlsx"
+CARRY_YAML = CARRY_DIR / "rules.yaml"
 
 
 @pytest.fixture

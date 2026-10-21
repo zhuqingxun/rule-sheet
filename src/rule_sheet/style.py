@@ -61,13 +61,14 @@ KV_WIDTH_BOUNDS = {
     "值": (16, 40),
     "变量": (12, 24),
     "定义": (24, 60),
+    "列名": (24, 70),
     NOTE: (30, 70),
 }
 DEFAULT_BOUNDS = (8, 40)
 PADDING = 2  # 内容宽度之外的留白 (字符)
 LINE_HEIGHT = 15.0  # Excel 默认行高 (磅), 换行格的行高 = 行数 * 它
 DATE_FORMAT = "yyyy-mm-dd"
-KV_SHEETS = ("输入", "设置", "变量定义", "匹配设置")
+KV_SHEETS = ("输入", "设置", "变量定义", "字段组", "匹配设置")
 
 _THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
@@ -220,7 +221,7 @@ def style_rule_table(ws: Worksheet, key_kind: str, allowed: tuple[str, ...]) -> 
 
 
 def style_kv_sheet(ws: Worksheet) -> None:
-    """输入 / 设置 / 变量定义 / 旧 匹配设置: 第 1 行表头, A 列加粗, 「说明」列浅黄。"""
+    """输入 / 设置 / 变量定义 / 字段组 / 旧 匹配设置: 第 1 行表头, A 列加粗, 「说明」列浅黄。"""
     last = _last_row(ws)
     if last == 0:
         return

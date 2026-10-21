@@ -19,6 +19,7 @@ DEFAULT_JOIN_SEP = "/"
 DUP_POLICIES = ("取第一条", "报错")  # 参照表匹配键重复时
 PRIMARY_WORD = "主表"  # 「输入」里主表那一行的「匹配」写它: 输出的行就是主表的行, 其它输入都对齐到它
 SETTING_KEYS = ("基准日期", "输出", JOIN_SEP_KEY)
+FIELD_GROUP_KEY = "字段组"  # Excel sheet 名 / YAML 顶层键: 给一组列起个名字, 决策表里一格就能整组复制 / 清空
 EXIST_VAR = "存在"  # 参照表是否匹配到, 实际变量名是 <输入名>.存在
 BASE_DATE_VAR = "基准日期"
 
@@ -92,6 +93,9 @@ class RuleSet:
     tests: list[TestCase] = field(default_factory=list)
     source: str = ""
     variables: list[str] = field(default_factory=list)  # 规则引用到的变量, 测试用例没给的视为空值
+    # 字段组: 组名 -> 列名清单。加载时已把规则里写在组名下的输出格展开成逐列 (Rule.outputs 里没有组名),
+    # 这里留着给导出 / 比对 / 运行时「组名与真实列撞名」的检查用
+    field_groups: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def primary(self) -> InputSpec:

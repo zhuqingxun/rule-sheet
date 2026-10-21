@@ -2,16 +2,29 @@
 
 import pandas as pd
 import pytest
+from openpyxl import load_workbook
 
 from rule_sheet import cli
 from rule_sheet.engine import run, run_tests
 from rule_sheet.loaders import load_rules
 
-from .conftest import EXCEL_RULES, STATUS_DIR, STATUS_EXCEL, STATUS_YAML, TAGS_EXCEL, TAGS_YAML, YAML_RULES
+from .conftest import (
+    CARRY_DIR,
+    CARRY_EXCEL,
+    CARRY_YAML,
+    EXCEL_RULES,
+    STATUS_DIR,
+    STATUS_EXCEL,
+    STATUS_YAML,
+    TAGS_EXCEL,
+    TAGS_YAML,
+    YAML_RULES,
+)
 
 FRONTENDS = pytest.mark.parametrize("rules_file", [EXCEL_RULES, YAML_RULES], ids=["excel", "yaml"])
 STATUS_FRONTENDS = pytest.mark.parametrize("rules_file", [STATUS_EXCEL, STATUS_YAML], ids=["excel", "yaml"])
 TAGS_FRONTENDS = pytest.mark.parametrize("rules_file", [TAGS_EXCEL, TAGS_YAML], ids=["excel", "yaml"])
+CARRY_FRONTENDS = pytest.mark.parametrize("rules_file", [CARRY_EXCEL, CARRY_YAML], ids=["excel", "yaml"])
 
 EXPECTED_HITS = {
     "C001": "R1",
@@ -211,6 +224,74 @@ def test_tags_frontends_agree(tmp_path):
     b = run(TAGS_YAML, output=tmp_path / "b.xlsx").out
     cols = ["岗位编码", "标签", "显示名", "命中规则", "变更明细"]
     pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
+
+
+# ---------------------------------------------------------------------------
+# 第四个样例 carry-forward: 字段组 (整组从上期复制 / 显式列优先 / 整组同步把空值也带过来)
+# ---------------------------------------------------------------------------
+
+CARRY_OUTPUTS = ["例会时间", "类别-会议", "状态-会议", "例会结论", "备注", "待跟进事宜"]
+CARRY_HITS = {"K001": "R1", "K002": "R2", "K003": "R3", "K004": "", "K005": "R1", "K006": "", "K007": "R1"}
+
+
+@CARRY_FRONTENDS
+def test_carry_field_groups_expand_at_load(rules_file):
+    rs = load_rules(rules_file)
+    assert rs.field_groups == {"会议记录": CARRY_OUTPUTS}
+    assert rs.outputs == CARRY_OUTPUTS  # 字段组在原位置展开; 例会时间 / 状态-会议 既在组里又是显式列, 只出现一次
+    r1, r2, r3 = rs.rules
+    copied = {c: f"上期.{c}" for c in CARRY_OUTPUTS}
+    assert r1.outputs == {**copied, "例会时间": "=基准日期"}  # 显式写的列优先于字段组里的同名列
+    assert r2.outputs == {"例会时间": "=基准日期", "状态-会议": "01-新增"}  # 字段组格留空 = 整组不改
+    assert r3.outputs == {**copied, "状态-会议": "06-本批未冒泡"}
+    assert "会议记录" not in r1.outputs and {f"上期.{c}" for c in CARRY_OUTPUTS} <= set(rs.variables)
+    outcomes = run_tests(rs)
+    assert len(outcomes) == 6
+    assert all(o.passed for o in outcomes), [(o.name, o.problems, o.error) for o in outcomes if not o.passed]
+
+
+@CARRY_FRONTENDS
+def test_carry_real_data_copies_whole_group(rules_file, tmp_path):
+    res = run(rules_file, output=tmp_path / "out.xlsx")
+    assert not res.stopped_by_tests and res.out is not None
+    assert dict(zip(res.out["岗位编码"], res.out["命中规则"], strict=True)) == CARRY_HITS
+    row = res.out.set_index("岗位编码")
+    assert row.loc["K001", "例会时间"] == pd.Timestamp("2026-10-20") and row.loc["K001", "待跟进事宜"] == "确认任命时间"
+    assert row.loc["K003", "例会时间"] == pd.Timestamp("2026-09-20") and row.loc["K003", "状态-会议"] == "06-本批未冒泡"
+    assert (
+        pd.isna(row.loc["K005", "备注"]) and row.loc["K005", "状态-会议"] == "03-按计划进行"
+    )  # 整组同步: 上期为空也带过来
+    assert pd.isna(row.loc["K004", "状态-会议"]) and pd.isna(row.loc["K006", "状态-会议"])
+    assert row.loc["K005", "变更明细"] == (
+        "例会时间: 2026-09-20 -> 2026-10-20; 状态-会议: 02-进展更新 -> 03-按计划进行; "
+        "例会结论: 候选人面谈 -> 面谈通过; 备注: 临时备注 -> 空; 待跟进事宜: 空 -> 走审批"
+    )
+    assert len(res.changed) == 5
+    back = pd.read_excel(res.written).set_index("岗位编码")
+    assert back.loc["K001", "例会时间"] == pd.Timestamp("2026-10-20")
+    ws = load_workbook(res.written)["Sheet1"]
+    col = next(c for c in range(1, ws.max_column + 1) if ws.cell(1, c).value == "例会时间")
+    assert ws.cell(2, col).number_format == "yyyy-mm-dd"  # 规则写过之后变成 object 的日期列, 写出仍是日期格
+
+
+def test_carry_frontends_agree(tmp_path):
+    a = run(CARRY_EXCEL, output=tmp_path / "a.xlsx").out
+    b = run(CARRY_YAML, output=tmp_path / "b.xlsx").out
+    cols = ["岗位编码", *CARRY_OUTPUTS, "命中规则", "变更明细"]
+    pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
+
+
+def test_field_group_named_like_a_real_column_is_an_error(tmp_path):
+    """组名在决策表里占一个输出列的位置; 主表真有同名列的话那一列永远写不到, 读到数据时报错而不是静默。"""
+    src = CARRY_YAML.read_text(encoding="utf-8")
+    p = tmp_path / "r.yaml"
+    renamed = src.replace("会议记录: [例会时间", "岗位名称: [例会时间").replace("会议记录: 上期", "岗位名称: 上期")
+    assert renamed != src
+    p.write_text(renamed, encoding="utf-8")
+    rs = load_rules(p)
+    assert "岗位名称" in rs.field_groups  # 加载时没有数据, 查不出撞名
+    with pytest.raises(ValueError, match="字段组「岗位名称」与主表「本期」的列同名"):
+        run(p, base_dir=CARRY_DIR, dry_run=True)
 
 
 def test_cli_run_and_test(tmp_path, capsys):

@@ -23,6 +23,7 @@ from .model import (
     CLEAR_WORDS,
     DUP_POLICIES,
     EXIST_VAR,
+    FIELD_GROUP_KEY,
     HIT_POLICIES,
     JOIN_POLICY,
     JOIN_SEP_KEY,
@@ -39,6 +40,7 @@ from .model import (
 RULE_KINDS = ("规则ID", "优先级", "输入", "输出", "说明")
 TEST_KINDS = ("用例", "输入", "期望", "说明")
 INPUT_COLS = ("名称", "匹配", "重复键", "文件", "说明")
+FIELD_GROUP_COLS = ("名称", "列名", "说明")
 POLICY_LABEL = "命中策略"
 LEGACY_DEFAULT_NAMES = ("主表", "本月")  # 0.4 以前「匹配设置」里左右表别名的默认值
 
@@ -167,6 +169,101 @@ def _legacy_inputs(match: dict[str, Any]) -> tuple[list[InputSpec], dict[str, An
     ]
     settings = {k: match[k] for k in SETTING_KEYS if match.get(k) not in (None, "")}
     return inputs, settings
+
+
+# ---------------------------------------------------------------------------
+# 字段组 (两种前端共用): 给一组列起个名字, 决策表里以组名为列名的输出格一格表达「整组从某个输入复制 / 整组清空」
+# ---------------------------------------------------------------------------
+
+
+def _check_field_groups(groups: dict[str, list[str]], names: list[str], where: str) -> dict[str, list[str]]:
+    all_cols = {c for cols in groups.values() for c in cols}
+    for name, cols in groups.items():
+        if not cols:
+            raise ValueError(f"{where}: 字段组「{name}」没有列; 写上它包含的列名 (逗号分隔)")
+        dup = [c for c in cols if cols.count(c) > 1]
+        if dup:
+            raise ValueError(f"{where}: 字段组「{name}」里的列「{dup[0]}」重复")
+        if name in names:
+            raise ValueError(f"{where}: 字段组「{name}」与输入名重复; 组名要能和输入名区分开")
+        if name in all_cols:
+            raise ValueError(f"{where}: 字段组名「{name}」同时是某个字段组里的列名; 组名不能是列名")
+    return groups
+
+
+def _read_field_groups_sheet(ws: Any, names: list[str]) -> dict[str, list[str]]:
+    """「字段组」sheet: 第 1 行列名 (名称 / 列名 / 说明), 之后每行一个组, 「列名」格里逗号分隔。"""
+    grid = _rows(ws)
+    header = [_text(v) for v in grid[0]] if grid else []
+    col = {h: i for i, h in enumerate(header) if h}
+    for need in ("名称", "列名"):
+        if need not in col:
+            raise ValueError(
+                f"「{FIELD_GROUP_KEY}」sheet 第 1 行缺少「{need}」列 (列名: {' / '.join(FIELD_GROUP_COLS)})"
+            )
+    groups: dict[str, list[str]] = {}
+    for row in grid[1:]:
+        name = _text(_at(row, col["名称"]))
+        if not name:
+            continue
+        if name in groups:
+            raise ValueError(f"「{FIELD_GROUP_KEY}」sheet: 字段组「{name}」重复")
+        groups[name] = split_top_level(_text(_at(row, col["列名"])))
+    return _check_field_groups(groups, names, f"「{FIELD_GROUP_KEY}」sheet")
+
+
+def _yaml_field_groups(doc: dict[str, Any], names: list[str]) -> dict[str, list[str]]:
+    """YAML: 字段组: {组名: [列, 列, ...]} (也认逗号分隔的一个字符串)。"""
+    groups: dict[str, list[str]] = {}
+    for name, cols in (doc.get(FIELD_GROUP_KEY) or {}).items():
+        if isinstance(cols, str):
+            cols = split_top_level(cols)
+        elif not isinstance(cols, list):
+            raise ValueError(f"YAML {FIELD_GROUP_KEY}: 「{name}」的值要是列名清单 ([a, b] 或 'a, b')")
+        groups[str(name)] = [str(c).strip() for c in cols]
+    return _check_field_groups(groups, names, f"YAML {FIELD_GROUP_KEY}:")
+
+
+def expand_group_outputs(
+    outputs: dict[str, Any], groups: dict[str, list[str]], names: list[str], where: str
+) -> dict[str, Any]:
+    """把写在字段组名下的输出格展开成逐列: 格里写输入名 = 组内每列从该输入的同名列复制 (`上期.列`),
+    写 清空 = 整组清空, 留空 / `-` = 整组不改; 同一条规则显式写了 (非空) 的列以显式为准。引擎只见到展开后的逐列输出。
+
+    Excel 里每条规则的每个输出列都在 outputs 里 (没写的是 - / None), 所以「显式」按值判, 不按键判。"""
+    explicit = {c for c, v in outputs.items() if c not in groups and _text(v) not in BLANK_WORDS}
+    out: dict[str, Any] = {}
+    for col, v in outputs.items():
+        if col not in groups:
+            if col in explicit or col not in out:  # 留空的列不覆盖字段组已经展开出来的值
+                out[col] = v
+            continue
+        text = _text(v)
+        if text in BLANK_WORDS:
+            continue
+        if text in CLEAR_WORDS or text == NULL_WORD:
+            expanded = {c: "清空" for c in groups[col]}
+        elif text in names:
+            expanded = {c: f"{text}.{c}" for c in groups[col]}
+        else:
+            raise ValueError(
+                f"{where} 输出「{col}」= {text}: 字段组格只能写一个输入名 ({' / '.join(names)}, "
+                f"表示组内每列从它的同名列复制)、清空 或 - (不改)"
+            )
+        for c, val in expanded.items():
+            if c not in explicit:
+                out[c] = val
+    return out
+
+
+def expand_output_names(headers: list[str], groups: dict[str, list[str]]) -> list[str]:
+    """输出列清单: 字段组名换成它的列 (在原位置), 重复的只留第一次出现。"""
+    out: list[str] = []
+    for h in headers:
+        for c in groups.get(h, [h]):
+            if c not in out:
+                out.append(c)
+    return out
 
 
 def _allowed_test_inputs(
@@ -384,15 +481,25 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
             for r in _rows(wb["变量定义"])[1:]
             if r and r[0] not in (None, "") and len(r) > 1 and r[1] not in (None, "")
         ]
+    groups = _read_field_groups_sheet(wb[FIELD_GROUP_KEY], names) if FIELD_GROUP_KEY in wb.sheetnames else {}
 
     grid = _rows(wb["决策表"])
     cols, kind_row, body_start = _parse_header(grid, "决策表", "规则ID", RULE_KINDS)
     hit_policy = _check_policy(_find_policy(grid, kind_row))
     raw = read_decision_rows(grid, cols, body_start)
-    rules = [Rule(r.rule_id, r.priority, _branch_conditions(r.branches), r.outputs, r.desc) for r in raw]
-    # 输入格 / 输出格原文, 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 本期.z);
+    rules = [
+        Rule(
+            r.rule_id,
+            r.priority,
+            _branch_conditions(r.branches),
+            expand_group_outputs(r.outputs, groups, names, f"规则 {r.rule_id} (第 {r.row} 行)"),
+            r.desc,
+        )
+        for r in raw
+    ]
+    # 输入格原文 + 展开后的输出格, 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 本期.z / 字段组展开出的 上期.z);
     # 区间 [0..本期.上限] 里变量紧跟在 .. 后面, 扫描器的名字边界不认 . 前缀, 先把 .. 隔开
-    cells = [v for r in raw for b in r.branches for v in b.values()] + [v for r in raw for v in r.outputs.values()]
+    cells = [v for r in raw for b in r.branches for v in b.values()] + [v for r in rules for v in r.outputs.values()]
     cell_texts = [v.replace("..", " .. ") for v in cells if isinstance(v, str)]
 
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
@@ -400,7 +507,7 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
     texts = cell_texts + [e for _, e in derived]
     extra = sorted({n for t in texts for n in find_names(t, names, known)} - set(input_names))
     variables = input_names + extra  # 表头输入列 + 单元格与派生变量表达式里引用的列, 用例没给的都视为空
-    output_names = [n for _, k, n in cols if k == "输出"]
+    output_names = expand_output_names([n for _, k, n in cols if k == "输出"], groups)
 
     tests: list[TestCase] = []
     if "测试" in wb.sheetnames:
@@ -425,7 +532,16 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
             raise ValueError("「测试」sheet 里没有任何用例 (「用例」列为空的行会跳过); 写上用例, 或删掉这张 sheet")
 
     rs = RuleSet(
-        inputs, settings, derived, hit_policy, rules, output_names, tests, source=path.name, variables=variables
+        inputs,
+        settings,
+        derived,
+        hit_policy,
+        rules,
+        output_names,
+        tests,
+        source=path.name,
+        variables=variables,
+        field_groups=groups,
     )
     return _check_join_policy(rs), raw
 
@@ -461,8 +577,9 @@ def load_yaml_rules(path: Path) -> RuleSet:
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     inputs, settings = _yaml_inputs(doc)
     names = [s.name for s in inputs]
+    groups = _yaml_field_groups(doc, names)
     rules: list[Rule] = []
-    outputs: list[str] = []
+    headers: list[str] = []
     for order, r in enumerate(doc.get("规则") or []):
         conds = r.get("当") or []
         then = r.get("则") or {}  # 则: 省略或为空 = 命中但什么都不改 (首次命中 下用来拦截一行)
@@ -474,17 +591,18 @@ def load_yaml_rules(path: Path) -> RuleSet:
                 rule_id=rid,
                 priority=float(r.get("优先级", 1000 + order)),
                 conditions=[build_condition(conds)] if conds else [],
-                outputs=dict(then),
+                outputs=expand_group_outputs({str(k): v for k, v in then.items()}, groups, names, f"规则 {rid}"),
                 desc=str(r.get("名称", "")),
             )
         )
         for col in then:
-            if col not in outputs:
-                outputs.append(col)
+            if str(col) not in headers:
+                headers.append(str(col))
+    outputs = expand_output_names(headers, groups)
     derived = [(str(k), str(v)) for k, v in (doc.get("变量") or {}).items()]
-    # 扫描 当 / 则 / 变量 里引用到的 <输入名>.<列> 变量名; YAML 里新增写变量名的位置要同步加进 texts
+    # 扫描 当 / 则 (字段组已展开) / 变量 里引用到的 <输入名>.<列> 变量名; YAML 里新增写变量名的位置要同步加进 texts
     texts = [s for r in doc.get("规则") or [] for s in strings_in(r.get("当"))]
-    texts += [str(v) for r in doc.get("规则") or [] for v in (r.get("则") or {}).values()]
+    texts += [str(v) for r in rules for v in r.outputs.values()]
     texts += [v for _, v in derived]
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
     variables = sorted({n for t in texts for n in find_names(t, names, known)} | {k for k, _ in derived})
@@ -511,6 +629,7 @@ def load_yaml_rules(path: Path) -> RuleSet:
             tests,
             source=path.name,
             variables=variables,
+            field_groups=groups,
         )
     )
 

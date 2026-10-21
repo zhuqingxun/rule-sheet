@@ -4,7 +4,7 @@
   conditions.unary_test 逐分支写, 续行翻成 任一满足。导出的 YAML 是生成物: 源仍是 Excel, 改了 Excel 重新导出。
 - YAML -> Excel (yaml_to_workbook): 只对「表格子集」成立, 每个条件必须是一个变量上的一元测试 (比较 / 区间 /
   属于 / 文本函数 / 判空 / 裸布尔名), 顶层 任一满足 翻成续行; 其它写法报错并指向变量定义。
-- 两份规则文件的语义比对 (diff_rules): 结构逐项比 (输入 / 设置 / 变量 / 命中策略 / 规则 / 输出列 / 用例);
+- 两份规则文件的语义比对 (diff_rules): 结构逐项比 (输入 / 设置 / 字段组 / 变量 / 命中策略 / 规则 / 输出列 / 用例);
   条件是编译好的函数比不了文本, 改为把两边的测试用例合并, 每条在两套规则上各跑一次, 比实际输出和命中 ID
   (按用例交叉验证, 是抽样等价, 不是证明)。
 """
@@ -31,6 +31,7 @@ from .model import (
     BLANK_WORDS,
     EXIST_VAR,
     FALSE_WORDS,
+    FIELD_GROUP_KEY,
     NULL_WORD,
     PRIMARY_WORD,
     TRUE_WORDS,
@@ -179,11 +180,16 @@ class FlowDict(dict):
     """dump 成 {a: 1, b: 2} 的一行写法 (输入声明、用例的输入 / 期望)。"""
 
 
+class FlowList(list):
+    """dump 成 [a, b, c] 的一行写法 (字段组的列名清单)。"""
+
+
 class _Dumper(yaml.SafeDumper):
     pass
 
 
 _Dumper.add_representer(FlowDict, lambda d, data: d.represent_mapping("tag:yaml.org,2002:map", data, flow_style=True))
+_Dumper.add_representer(FlowList, lambda d, data: d.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=True))
 
 
 def _plain(v: Any) -> Any:
@@ -245,10 +251,12 @@ def excel_to_yaml_doc(path: str | Path) -> tuple[dict[str, Any], RuleSet]:
         doc["输入"][s.name] = FlowDict(entry)
     if rs.settings:
         doc["设置"] = {k: _plain(v) for k, v in rs.settings.items()}
+    if rs.field_groups:
+        doc[FIELD_GROUP_KEY] = {k: FlowList(v) for k, v in rs.field_groups.items()}
     if rs.derived:
         doc["变量"] = dict(rs.derived)
     doc["命中策略"] = rs.hit_policy
-    doc["规则"] = [_rule_doc(tr, r) for r in raw]
+    doc["规则"] = [_rule_doc(tr, r) for r in raw]  # 输出格取原文: 字段组名下的格保持 组名: 输入名 的形态
     if rs.tests:
         doc["测试"] = [{"用例": t.name, "输入": _given(t.inputs), "期望": _given(t.expected)} for t in rs.tests]
     return doc, rs
@@ -571,13 +579,16 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
     conv = ExprToCell(rs)
     primary = rs.primary.name
     columns: list[str] = []
+    headers: list[str] = []  # 决策表的输出列按 则: 原文 (字段组名保留为一列); 测试 sheet 的期望列是展开后的 rs.outputs
     parsed: list[tuple[str, Any, list[dict[str, str]], dict[str, Any], str]] = []
     for order, r in enumerate(doc.get("规则") or []):
         rid = str(r.get("编号", f"R{order + 1}"))
         branches = conv.branches(r.get("当") or [], f"规则 {rid}")
         for b in branches:
             columns.extend(v for v in b if v not in columns)
-        parsed.append((rid, r.get("优先级", 1000 + order), branches, dict(r.get("则") or {}), str(r.get("名称", ""))))
+        then = {str(k): v for k, v in (r.get("则") or {}).items()}
+        headers.extend(k for k in then if k not in headers)
+        parsed.append((rid, r.get("优先级", 1000 + order), branches, then, str(r.get("名称", ""))))
 
     wb = Workbook()
     ws = wb.active
@@ -595,19 +606,24 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
         ws.append(["变量", "定义", "说明"])
         for k, v in rs.derived:
             ws.append([k, v, None])
+    if rs.field_groups:
+        ws = wb.create_sheet(FIELD_GROUP_KEY)
+        ws.append(["名称", "列名", "说明"])
+        for k, cols in rs.field_groups.items():
+            ws.append([k, ", ".join(cols), None])
 
     ws = wb.create_sheet("决策表")
     ws.append(["命中策略", rs.hit_policy])
-    ws.append(["规则ID", "优先级", *["输入"] * len(columns), *["输出"] * len(rs.outputs), "说明"])
-    ws.append(["规则ID", "优先级", *columns, *rs.outputs, "说明"])
+    ws.append(["规则ID", "优先级", *["输入"] * len(columns), *["输出"] * len(headers), "说明"])
+    ws.append(["规则ID", "优先级", *columns, *headers, "说明"])
     for rid, priority, branches, then, desc in parsed:
         first = ws.max_row + 1
         for i, b in enumerate(branches):
             cells = [b.get(c) for c in columns]
             if i == 0:
-                ws.append([rid, priority, *cells, *[_excel_value(then.get(o)) for o in rs.outputs], desc or None])
+                ws.append([rid, priority, *cells, *[_excel_value(then.get(o)) for o in headers], desc or None])
             else:
-                ws.append([None, None, *cells, *[None] * len(rs.outputs), None])
+                ws.append([None, None, *cells, *[None] * len(headers), None])
         if len(branches) > 1:
             ws.merge_cells(start_row=first, start_column=1, end_row=first + len(branches) - 1, end_column=1)
             ws.merge_cells(start_row=first, start_column=2, end_row=first + len(branches) - 1, end_column=2)
@@ -688,6 +704,8 @@ def _structure_diff(a: RuleSet, b: RuleSet, res: DiffResult) -> None:
             (res.notes if k == "输出" else res.differences).append(f"设置「{k}」: A {va}, B {vb}")
     if a.derived != b.derived:
         res.differences.append(f"变量定义不同: A {a.derived}, B {b.derived}")
+    if a.field_groups != b.field_groups:
+        res.differences.append(f"字段组不同: A {a.field_groups}, B {b.field_groups}")
     if a.hit_policy != b.hit_policy:
         res.differences.append(f"命中策略: A {a.hit_policy}, B {b.hit_policy}")
     if set(a.outputs) != set(b.outputs):
