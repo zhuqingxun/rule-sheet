@@ -132,46 +132,99 @@ def _concat_rows(spec: InputSpec, df: pd.DataFrame, mine: list[str]) -> pd.DataF
     return grouped.reset_index()
 
 
+def _prepare_lookup(
+    rs: RuleSet,
+    spec: InputSpec,
+    df: pd.DataFrame,
+    base_cols: list[str],
+    base_date: pd.Timestamp,
+    notes: list[str] | None,
+) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """一个参照表在合并前的准备: 校验键列、剔掉键为空的行、算带前缀的派生变量、按「重复键」去重或聚合。"""
+    primary = rs.primary
+    if not spec.keys:
+        raise ValueError(f"输入「{spec.name}」没有匹配键, 不知道怎么对齐到主表「{primary.name}」")
+    mine = [m for m, _ in spec.keys]
+    theirs = [t for _, t in spec.keys]
+    for c in theirs:
+        if c not in base_cols:
+            raise ValueError(f"主表「{primary.name}」没有列「{c}」, 而输入「{spec.name}」要按它对齐")
+    for c in mine:
+        if c not in df.columns:
+            raise ValueError(f"输入「{spec.name}」没有匹配键列「{c}」")
+    df = df[df[mine].notna().all(axis=1)]  # 键为空的行不参与匹配: pandas merge 会把两边的 NaN 配成一对
+    df = _add_input_derived(rs, spec, df, base_date)
+    dup = df.duplicated(subset=mine, keep="first")
+    if dup.any():
+        if spec.dup_policy == CONCAT_POLICY:
+            if notes is not None:
+                notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「{CONCAT_POLICY}」接成一行")
+        elif spec.dup_policy != "取第一条":
+            raise ValueError(
+                f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 而它的「重复键」设置为 {spec.dup_policy}"
+            )
+        else:
+            if notes is not None:
+                notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「取第一条」处理")
+            df = df[~dup]
+    if spec.dup_policy == CONCAT_POLICY:
+        df = _concat_rows(spec, df, mine)  # 没有重复键也走一遍: 单条记录同样要占位 / 带序号, 形态一致
+    return df, mine, theirs
+
+
+def _append_only_rows(
+    spec: InputSpec,
+    df: pd.DataFrame,
+    mine: list[str],
+    theirs: list[str],
+    base: pd.DataFrame,
+    exists: pd.Series,
+    notes: list[str] | None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """独有行: 追加 — 参照表里键在主表 (含前面已追加的行) 找不到的行接到行集末尾:
+    键列按匹配映射填, 同名列带入, 主表独有的列为空; 主表 .存在 在这些行上为 否。"""
+    keyed = base[theirs].drop_duplicates()
+    flags = df[mine].merge(keyed, left_on=mine, right_on=theirs, how="left", indicator=True)["_merge"]
+    only = df.loc[flags.eq("left_only").to_numpy()]
+    if only.empty:
+        return base, exists
+    new = pd.DataFrame(index=pd.RangeIndex(len(only)), columns=base.columns, dtype=object)
+    for m_col, t_col in zip(mine, theirs, strict=True):
+        new[t_col] = only[m_col].to_numpy()
+    for col in base.columns:
+        if col in only.columns and col not in theirs:
+            new[col] = only[col].to_numpy()
+    if notes is not None:
+        notes.append(f"输入「{spec.name}」有 {len(only)} 行主表没有的键, 按「追加」接在末尾")
+    grown = pd.concat([base, new], ignore_index=True).infer_objects()
+    flag = pd.concat([exists, pd.Series(False, index=pd.RangeIndex(len(only)))], ignore_index=True)
+    return grown, flag
+
+
 def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[str] | None = None) -> Namespace:
     """以主表为锚, 每个参照表按各自的键 left join 进来。
 
-    匹配之前先在每张表自己的行上算带该表前缀的派生变量 (`报表7.现岗`); `重复键: 拼接` 的参照表再按键聚合成一键一行。
-    直接调 apply_rules 的编排器必须从这里拿命名空间, 聚合 / 追加都发生在这一步。
+    匹配之前: 每张表自己的行上先算带该表前缀的派生变量 (`报表7.现岗`); `重复键: 拼接` 的参照表按键聚合成一键一行;
+    `独有行: 追加` 的参照表把主表没有的键追加到行集末尾 (按声明顺序, 后面的对齐到已扩的行集),
+    主表 `.存在` 在这些行上为 否。直接调 apply_rules 的编排器必须从这里拿命名空间, 聚合 / 追加都发生在这一步;
+    扩展后的主表用 primary_frame 取。
     """
     primary = rs.primary
     base_date_raw = rs.settings.get(BASE_DATE_VAR)
     base_date = pd.Timestamp(base_date_raw) if base_date_raw else pd.Timestamp(date.today())
-    base = _add_input_derived(rs, primary, tables[primary.name], base_date)
-    ns: Namespace = {f"{primary.name}.{col}": base[col] for col in base.columns}
+    base = tables[primary.name]
+    base_cols = list(base.columns)
+    prepared = {s.name: _prepare_lookup(rs, s, tables[s.name], base_cols, base_date, notes) for s in rs.lookups}
+    exists = pd.Series(True, index=base.index)
     for spec in rs.lookups:
-        df = tables[spec.name]
-        if not spec.keys:
-            raise ValueError(f"输入「{spec.name}」没有匹配键, 不知道怎么对齐到主表「{primary.name}」")
-        mine = [m for m, _ in spec.keys]
-        theirs = [t for _, t in spec.keys]
-        for c in theirs:
-            if c not in base.columns:
-                raise ValueError(f"主表「{primary.name}」没有列「{c}」, 而输入「{spec.name}」要按它对齐")
-        for c in mine:
-            if c not in df.columns:
-                raise ValueError(f"输入「{spec.name}」没有匹配键列「{c}」")
-        df = df[df[mine].notna().all(axis=1)]  # 键为空的行不参与匹配: pandas merge 会把两边的 NaN 配成一对
-        df = _add_input_derived(rs, spec, df, base_date)
-        dup = df.duplicated(subset=mine, keep="first")
-        if dup.any():
-            if spec.dup_policy == CONCAT_POLICY:
-                if notes is not None:
-                    notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「{CONCAT_POLICY}」接成一行")
-            elif spec.dup_policy != "取第一条":
-                raise ValueError(
-                    f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 而它的「重复键」设置为 {spec.dup_policy}"
-                )
-            else:
-                if notes is not None:
-                    notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「取第一条」处理")
-                df = df[~dup]
-        if spec.dup_policy == CONCAT_POLICY:
-            df = _concat_rows(spec, df, mine)  # 没有重复键也走一遍: 单条记录同样要占位 / 带序号, 形态一致
+        if spec.append:
+            df, mine, theirs = prepared[spec.name]
+            base, exists = _append_only_rows(spec, df, mine, theirs, base, exists, notes)
+    base = _add_input_derived(rs, primary, base, base_date)
+    ns: Namespace = {f"{primary.name}.{col}": base[col] for col in base.columns}
+    ns[f"{primary.name}.{EXIST_VAR}"] = exists
+    for spec in rs.lookups:
+        df, mine, theirs = prepared[spec.name]
         # 左侧只带主表的键列, 参照表之间同名列互不干扰; 参照表里与主表键列同名的非键列保留参照表的 (主表的加后缀)
         merged = base[theirs].merge(df, left_on=theirs, right_on=mine, how="left", suffixes=("__p", ""), indicator=True)
         merged.index = base.index
@@ -181,6 +234,11 @@ def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[st
         ns[f"{spec.name}.{EXIST_VAR}"] = merged["_merge"].eq("both")
     ns[BASE_DATE_VAR] = base_date
     return ns
+
+
+def primary_frame(rs: RuleSet, ns: Namespace, columns: list[str]) -> pd.DataFrame:
+    """从命名空间取回 (可能已追加了独有行的) 主表: columns 是主表原有的列。输出的行就是它的行。"""
+    return pd.DataFrame({c: ns[f"{rs.primary.name}.{c}"] for c in columns})
 
 
 def add_derived(rs: RuleSet, ns: Namespace, index: pd.Index, *, lenient: bool) -> None:
@@ -356,7 +414,7 @@ class TestOutcome:
 
 def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.Series]]:
     """把一条用例构造成 1 行的命名空间 (含派生变量) 和各输出列的原值; run_tests 与 diff 的交叉验证共用。"""
-    exist_vars = {f"{s.name}.{EXIST_VAR}" for s in rs.lookups}
+    exist_vars = {f"{s.name}.{EXIST_VAR}" for s in rs.inputs}
     derived_names = {d for d, _ in rs.plain_derived}  # 带输入前缀的派生变量按普通变量对待: 给了用, 没给为空
     index = pd.RangeIndex(1)
     ns: Namespace = {}
@@ -372,6 +430,8 @@ def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.S
         dtype = object if isinstance(val, str) or val is None else None
         ns[name] = pd.Series([val], index=index, dtype=dtype)
     ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.settings.get(BASE_DATE_VAR) or date.today()))
+    # 主表的 .存在 没给默认 是 (普通行); 要测追加来的行就写 否
+    ns.setdefault(f"{rs.primary.name}.{EXIST_VAR}", pd.Series([True], index=index))
     for name in rs.variables:  # 用例没提到的变量 = 空值
         if name not in ns and name not in derived_names:
             ns[name] = pd.Series([None], index=index, dtype=object)
@@ -504,8 +564,8 @@ def run(
 
     bound = bind_inputs(rs, base, inputs)
     tables = {name: read_table(p, sheet) for name, (p, sheet) in bound.items()}
-    primary_df = tables[rs.primary.name]
-    clash = [g for g in rs.field_groups if g in primary_df.columns]
+    columns = list(tables[rs.primary.name].columns)
+    clash = [g for g in rs.field_groups if g in columns]
     if clash:  # 组名在决策表里占一个输出列的位置, 加载时已展开成逐列; 主表真有同名列的话那一列永远写不到, 不能静默
         raise ValueError(
             f"字段组「{clash[0]}」与主表「{rs.primary.name}」的列同名; "
@@ -514,6 +574,7 @@ def run(
 
     notes: list[str] = []
     ns = build_namespace(rs, tables, notes)
+    primary_df = primary_frame(rs, ns, columns)  # 独有行: 追加 之后行集比读入的主表多, 输出的行就是它的行
     add_derived(rs, ns, primary_df.index, lenient=False)
     originals = {col: primary_df[col] for col in rs.outputs if col in primary_df.columns}
     first = rs.lookups[0].keys if rs.lookups else []

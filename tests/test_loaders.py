@@ -604,6 +604,25 @@ def test_excel_inputs_concat_errors(tmp_path, inputs, msg):
         load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=inputs))
 
 
+def test_inputs_append_option(tmp_path):
+    rows = [
+        ["名称", "匹配", "独有行"],
+        ["主表", "主表", None],
+        ["上期", "k", "追加"],
+        ["花名册", "k", "忽略"],
+        ["清单", "k", None],
+    ]
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=rows))
+    assert [s.append for s in rs.lookups] == [True, False, False]
+    with pytest.raises(ValueError, match="输入「上期」的「独有行」只认 忽略 / 追加, 不认识「保留」"):
+        load_rules(make_workbook(tmp_path / "a.xlsx", RULE, inputs=[rows[0], rows[1], ["上期", "k", "保留"]]))
+    with pytest.raises(ValueError, match="主表「主表」不能写「独有行」"):
+        load_rules(make_workbook(tmp_path / "b.xlsx", RULE, inputs=[rows[0], ["主表", "主表", "追加"], rows[2]]))
+    p = tmp_path / "r.yaml"
+    p.write_text("输入:\n  本期: {匹配: 主表}\n  上期: {匹配: k, 独有行: 追加}\n规则: []\n", encoding="utf-8")
+    assert load_yaml_rules(p).lookups[0].append is True
+
+
 def test_yaml_inputs_concat_options(tmp_path):
     p = tmp_path / "r.yaml"
     p.write_text(

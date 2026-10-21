@@ -416,7 +416,28 @@ def test_concat_input_options_survive_both_directions(tmp_path):
     p = tmp_path / "g.yaml"
     p.write_text(CAND_YAML.read_text(encoding="utf-8").replace("带序号: 是", "带序号: 否"), encoding="utf-8")
     res = diff_rules(CAND_EXCEL, p)
-    assert any(d.startswith("输入「冻结」的拼接选项") for d in res.differences)
+    assert any(d.startswith("输入「冻结」的选项") for d in res.differences)
+
+
+def test_append_option_survives_both_directions(tmp_path):
+    src = tmp_path / "a.yaml"
+    src.write_text(
+        "输入:\n  本期: {文件: a.xlsx, 匹配: 主表}\n  上期: {文件: b.xlsx, 匹配: 编码, 独有行: 追加}\n"
+        "规则:\n  - 编号: X1\n    当: [本期.存在 == 否]\n    则: {差异类型: REMOVED}\n"
+        "测试:\n  - 用例: T1\n    输入: {本期.存在: 否}\n    期望: {差异类型: REMOVED}\n",
+        encoding="utf-8",
+    )
+    out = export_workbook(src, tmp_path / "a.xlsx")
+    ws = load_workbook(out)["输入"]
+    assert [ws.cell(1, c).value for c in range(1, 7)] == ["名称", "匹配", "重复键", "独有行", "文件", "说明"]
+    assert [ws.cell(3, c).value for c in range(1, 6)] == ["上期", "编码", "取第一条", "追加", "b.xlsx"]
+    rs = load_rules(out)
+    assert rs.lookups[0].append is True and rs.variables == ["本期.存在"]
+    assert [o.passed for o in run_tests(rs)] == [True]
+    assert "独有行: 追加}" in excel_to_yaml(out)
+    assert diff_rules(src, out).same
+    src.write_text(src.read_text(encoding="utf-8").replace(", 独有行: 追加", ""), encoding="utf-8")
+    assert any(d.startswith("输入「上期」的选项") for d in diff_rules(src, out).differences)
 
 
 def test_yaml_outside_subset_reports_rule(tmp_path):

@@ -21,6 +21,8 @@ CONCAT_POLICY = "拼接"
 # 重复键: 拼接 的默认分隔符。与 多条拼接 的 / 是两个概念: 一个接同一个键的多条记录, 一个接多条规则的输出
 DEFAULT_CONCAT_SEP = ";"
 CONCAT_OPTS = ("排序", "分隔符", "空值占位", "带序号")  # 输入声明里只在 重复键: 拼接 时允许写的四个可选项
+APPEND_KEY = "独有行"  # 输入声明: 参照表里主表没有的行怎么办: 忽略 (默认) / 追加 (并入输出的行集末尾, 0.7, issue #19)
+APPEND_WORDS = {"忽略": False, "追加": True}
 PRIMARY_WORD = "主表"  # 「输入」里主表那一行的「匹配」写它: 输出的行就是主表的行, 其它输入都对齐到它
 SETTING_KEYS = ("基准日期", "输出", JOIN_SEP_KEY)
 FIELD_GROUP_KEY = "字段组"  # Excel sheet 名 / YAML 顶层键: 给一组列起个名字, 决策表里一格就能整组复制 / 清空
@@ -89,6 +91,8 @@ class InputSpec:
     sep: str = DEFAULT_CONCAT_SEP
     placeholder: str = ""  # 空值占位: 空格子换成它, 位置保留 (11 列之间按位置对齐); 留空 = 空文本
     numbered: bool = False  # 带序号: 1.a;2.b (占位符也带序号)
+    # 独有行: 追加 — 这个参照表里键在主表找不到的行追加到输出行集末尾 (同名列带入, 键列按匹配映射填), 主表 .存在 为 否
+    append: bool = False
 
 
 @dataclass

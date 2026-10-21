@@ -97,7 +97,8 @@ def test_namespace_three_inputs_with_own_keys_and_same_named_columns():
 def test_namespace_single_input_needs_no_join():
     base = pd.DataFrame({"k": [1, 2], "v": ["a", "b"]})
     ns = build_namespace(make_rs([], [], inputs=inputs_of(("表", None))), {"表": base})
-    assert set(ns) == {"表.k", "表.v", "基准日期"}
+    assert set(ns) == {"表.k", "表.v", "表.存在", "基准日期"}  # 主表的 .存在 总在 (没有追加时恒为 是)
+    assert ns["表.存在"].tolist() == [True, True]
 
 
 def test_lookup_rows_with_null_keys_never_match():
@@ -192,6 +193,72 @@ def test_concat_policy_errors():
     rs.derived = [("推荐.y", "岗位.x")]  # 只能引用同一张表的列
     with pytest.raises(ValueError, match="派生变量「推荐.y」在输入「推荐」的行上求值失败"):
         build_namespace(rs, {"岗位": base, "推荐": rec})
+
+
+def test_append_policy_adds_lookup_only_rows_to_the_row_set():
+    """独有行: 追加 (issue #19): 参照表里主表没有的键接到行集末尾, 同名列带入、键列按映射填、主表独有列为空;
+    主表 .存在 在这些行上为 否; 其它参照表照常对齐到追加来的行; 多个追加输入按声明顺序, 后面的对齐到已扩的行集。"""
+    base = pd.DataFrame({"编码": ["P1", "P2"], "名称": ["a", "b"], "工号": ["E1", "E2"], "本期独有": [1, 2]})
+    last = pd.DataFrame(
+        {"编码": ["P2", "P3", "P4"], "名称": ["b0", "c0", "d0"], "工号": ["E2", "E3", "E4"], "状态": ["x", "y", "z"]}
+    )
+    roster = pd.DataFrame({"人员工号": ["E1", "E3"], "姓名": ["张三", "王五"]})
+    older = pd.DataFrame(
+        {"岗位编码": ["P3", "P5"], "名称": ["c00", "e00"]}
+    )  # 键名与主表不同; P3 已被 上期 追加, 不再追加
+    rs = make_rs(
+        [],
+        [],
+        inputs=inputs_of(
+            ("本期", None), ("上期", ["编码"]), ("花名册", ["人员工号=工号"]), ("上上期", ["岗位编码=编码"])
+        ),
+    )
+    rs.lookups[0].append = rs.lookups[2].append = True
+    notes: list[str] = []
+    ns = build_namespace(rs, {"本期": base, "上期": last, "花名册": roster, "上上期": older}, notes)
+    assert ns["本期.编码"].tolist() == ["P1", "P2", "P3", "P4", "P5"]
+    assert ns["本期.名称"].tolist() == ["a", "b", "c0", "d0", "e00"]  # 同名列带入
+    assert ns["本期.工号"].tolist()[:4] == ["E1", "E2", "E3", "E4"] and pd.isna(ns["本期.工号"].iloc[4])
+    assert ns["本期.本期独有"].tolist()[:2] == [1, 2] and ns["本期.本期独有"].isna().tolist()[2:] == [True] * 3
+    assert ns["本期.存在"].tolist() == [True, True, False, False, False]
+    assert ns["上期.存在"].tolist() == [False, True, True, True, False] and ns["上期.状态"].tolist()[2] == "y"
+    assert ns["花名册.存在"].tolist() == [True, False, True, False, False]  # 追加行带入了 工号, 花名册照常对上
+    assert ns["花名册.姓名"].tolist()[2] == "王五"
+    assert ns["上上期.存在"].tolist() == [False, False, True, False, True]
+    assert "本期.状态" not in ns  # 主表没有的列不会因为追加多出来
+    assert [n for n in notes if "按「追加」接在末尾" in n] == [
+        "输入「上期」有 2 行主表没有的键, 按「追加」接在末尾",
+        "输入「上上期」有 1 行主表没有的键, 按「追加」接在末尾",
+    ]
+    from rule_sheet.engine import primary_frame
+
+    frame = primary_frame(rs, ns, list(base.columns))
+    assert list(frame.columns) == list(base.columns) and len(frame) == 5 and frame["编码"].tolist()[-1] == "P5"
+
+
+def test_append_with_concat_policy_appends_the_aggregated_row():
+    base = pd.DataFrame({"编码": ["P1"]})
+    rec = pd.DataFrame({"编码": ["P2", "P2", "P1"], "工号": ["E2", "E3", "E1"]})
+    rs = make_rs([], [], inputs=inputs_of(("本期", None), ("推荐", ["编码"])))
+    rs.lookups[0].dup_policy, rs.lookups[0].append = "拼接", True
+    ns = build_namespace(rs, {"本期": base, "推荐": rec})
+    assert ns["本期.编码"].tolist() == ["P1", "P2"] and ns["推荐.工号"].tolist() == ["E1", "E2;E3"]
+    assert ns["本期.存在"].tolist() == [True, False]
+
+
+def test_primary_exists_defaults_to_true_in_cases():
+    """用例里主表的 .存在 没给 = 是 (普通行), 写 否 = 追加来的行。"""
+    rs = make_rs(
+        [Rule("X1", 1, [cell_condition("本期.存在", "否")], {"差异类型": "REMOVED"})],
+        ["差异类型"],
+        inputs=inputs_of(("本期", None), ("上期", ["编码"])),
+        variables=["本期.存在"],
+        tests=[
+            TestCase("没给 = 普通行", {}, {}),
+            TestCase("追加来的行", {"本期.存在": "否"}, {"差异类型": "REMOVED"}),
+        ],
+    )
+    assert [(o.passed, o.hit) for o in run_tests(rs)] == [(True, ""), (True, "X1")]
 
 
 def test_input_prefixed_derived_is_given_not_computed_in_cases():

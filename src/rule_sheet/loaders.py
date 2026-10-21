@@ -18,6 +18,8 @@ from openpyxl.utils import get_column_letter
 from .conditions import all_of, any_of, build_condition, cell_condition, strings_in
 from .expressions import FUNCS, find_names, split_top_level
 from .model import (
+    APPEND_KEY,
+    APPEND_WORDS,
     BASE_DATE_VAR,
     BLANK_WORDS,
     CLEAR_WORDS,
@@ -44,8 +46,9 @@ from .model import (
 
 RULE_KINDS = ("规则ID", "优先级", "输入", "输出", "说明")
 TEST_KINDS = ("用例", "输入", "期望", "说明")
-INPUT_COLS = ("名称", "匹配", "重复键", *CONCAT_OPTS, "文件", "说明")
-INPUT_KEYS = ("文件", "匹配", "重复键", *CONCAT_OPTS, "说明")  # YAML 输入声明认的键
+INPUT_COLS = ("名称", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "文件", "说明")
+INPUT_KEYS = ("文件", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "说明")  # YAML 输入声明认的键
+INPUT_OPTS = (APPEND_KEY, *CONCAT_OPTS)  # 「输入」里除 名称 / 匹配 / 重复键 / 文件 之外的可选项, 都只对参照表有意义
 FIELD_GROUP_COLS = ("名称", "列名", "说明")
 POLICY_LABEL = "命中策略"
 LEGACY_DEFAULT_NAMES = ("主表", "本月")  # 0.4 以前「匹配设置」里左右表别名的默认值
@@ -172,7 +175,7 @@ def _build_inputs(rows: list[tuple[str, Any, Any, Any, dict[str, Any]]], where: 
     for name, match, dup_policy, path, opts in rows:
         file = _text(path) or None
         policy = _text(dup_policy) or "取第一条"
-        given = [k for k in CONCAT_OPTS if _text(opts.get(k))]
+        given = [k for k in INPUT_OPTS if _text(opts.get(k))]
         if name == primary:
             if given or _text(dup_policy):
                 raise ValueError(f"{where}: 主表「{name}」不能写「{(given or ['重复键'])[0]}」, 它们只对参照表有意义")
@@ -180,15 +183,26 @@ def _build_inputs(rows: list[tuple[str, Any, Any, Any, dict[str, Any]]], where: 
             continue
         if policy not in DUP_POLICIES:
             raise ValueError(f"{where}: 输入「{name}」的「重复键」只认 {' / '.join(DUP_POLICIES)}, 不认识「{policy}」")
-        if given and policy != CONCAT_POLICY:
+        concat_given = [k for k in given if k in CONCAT_OPTS]
+        if concat_given and policy != CONCAT_POLICY:
             raise ValueError(
-                f"{where}: 输入「{name}」写了「{given[0]}」, 但「重复键」是 {policy} 而不是 {CONCAT_POLICY}; "
+                f"{where}: 输入「{name}」写了「{concat_given[0]}」, 但「重复键」是 {policy} 而不是 {CONCAT_POLICY}; "
                 f"排序 / 分隔符 / 空值占位 / 带序号 只在 重复键: {CONCAT_POLICY} 时有意义"
+            )
+        append_text = _text(opts.get(APPEND_KEY))
+        if append_text and append_text not in APPEND_WORDS:
+            raise ValueError(
+                f"{where}: 输入「{name}」的「{APPEND_KEY}」只认 {' / '.join(APPEND_WORDS)}, 不认识「{append_text}」"
             )
         extra = _concat_options(opts, name, where) if policy == CONCAT_POLICY else {}
         specs.append(
             InputSpec(
-                name, keys=_parse_keys(_text(match), name, primary, names, where), dup_policy=policy, path=file, **extra
+                name,
+                keys=_parse_keys(_text(match), name, primary, names, where),
+                dup_policy=policy,
+                path=file,
+                append=APPEND_WORDS.get(append_text, False),
+                **extra,
             )
         )
     return specs
@@ -318,10 +332,10 @@ def expand_output_names(headers: list[str], groups: dict[str, list[str]]) -> lis
 def _allowed_test_inputs(
     variables: list[str], derived: list[tuple[str, str]], inputs: list[InputSpec], outputs: list[str]
 ) -> set[str]:
-    """测试用例里可以给值的名字: 规则引用的变量、派生变量、内置变量、输出列的原值 (<主表>.<输出列>)。"""
+    """测试用例里可以给值的名字: 规则引用的变量、派生变量、内置变量 (含主表的 .存在, 追加行上为 否)、输出列的原值。"""
     primary = next(s.name for s in inputs if s.primary)
     names = set(variables) | {k for k, _ in derived} | {BASE_DATE_VAR}
-    names |= {f"{s.name}.{EXIST_VAR}" for s in inputs if not s.primary}
+    names |= {f"{s.name}.{EXIST_VAR}" for s in inputs}
     return names | {f"{primary}.{o}" for o in outputs}
 
 
@@ -378,7 +392,7 @@ def _read_inputs_sheet(ws: Any) -> list[InputSpec]:
     for row in grid[1:]:
         name = _text(_at(row, col["名称"]))
         if name:
-            opts = {k: _at(row, col[k]) for k in CONCAT_OPTS if k in col}
+            opts = {k: _at(row, col[k]) for k in INPUT_OPTS if k in col}
             rows.append((name, _at(row, col["匹配"]), _at(row, col.get("重复键")), _at(row, col.get("文件")), opts))
     return _build_inputs(rows, "「输入」sheet")
 
@@ -618,7 +632,7 @@ def _yaml_inputs(doc: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
             bad = [k for k in v if k not in INPUT_KEYS]
             if bad:
                 raise ValueError(f"YAML 输入「{name}」里的「{bad[0]}」不认识, 只认: {' / '.join(INPUT_KEYS)}")
-            opts = {k: v.get(k) for k in CONCAT_OPTS if k in v}
+            opts = {k: v.get(k) for k in INPUT_OPTS if k in v}
             rows.append((str(name), v.get("匹配"), v.get("重复键"), v.get("文件"), opts))
         else:
             rows.append((str(name), None, None, v, {}))  # 只写一个字符串 = 文件名

@@ -27,6 +27,7 @@ from .engine import apply_rules, case_namespace, fmt, same
 from .expressions import FUNCS, TEXT_FUNCS, split_top_level, substitute_names
 from .loaders import RawRule, load_excel_raw, load_rules, load_yaml_rules
 from .model import (
+    APPEND_KEY,
     BASE_DATE_VAR,
     BLANK_WORDS,
     CONCAT_OPTS,
@@ -77,7 +78,7 @@ class CellTranslator:
     def __init__(self, rs: RuleSet) -> None:
         self.inputs = set(rs.names)
         self.derived = {k for k, _ in rs.derived}
-        self.exists = {f"{s.name}.{EXIST_VAR}" for s in rs.lookups}
+        self.exists = {f"{s.name}.{EXIST_VAR}" for s in rs.inputs}  # 主表的 .存在 (追加行上为 否) 也是布尔列
         self.known = list(self.derived) + list(FUNCS) + [BASE_DATE_VAR]
 
     def is_var(self, token: str) -> bool:
@@ -219,11 +220,13 @@ def _match_text(spec: Any, primary: str) -> str:
     return ", ".join(m if m == t else f"{m} = {primary}.{t}" for m, t in spec.keys)
 
 
-def _concat_opts(spec: Any) -> dict[str, Any]:
-    """重复键: 拼接 的四个可选项 (只写非默认的), Excel 的「输入」sheet 与 YAML 的输入声明共用。"""
-    if spec.primary or spec.dup_policy != CONCAT_POLICY:
+def _input_opts(spec: Any) -> dict[str, Any]:
+    """参照表的可选项 (只写非默认的): 独有行 + 重复键: 拼接 的四项。Excel「输入」sheet 与 YAML 输入声明共用。"""
+    if spec.primary:
         return {}
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = {APPEND_KEY: "追加"} if spec.append else {}
+    if spec.dup_policy != CONCAT_POLICY:
+        return out
     if spec.sort:
         out["排序"] = ", ".join(f"{c} {'升序' if asc else '降序'}" for c, asc in spec.sort)
     if spec.sep != DEFAULT_CONCAT_SEP:
@@ -267,7 +270,7 @@ def excel_to_yaml_doc(path: str | Path) -> tuple[dict[str, Any], RuleSet]:
         entry["匹配"] = _match_text(s, primary)
         if not s.primary and s.dup_policy != "取第一条":
             entry["重复键"] = s.dup_policy
-        entry.update(_concat_opts(s))
+        entry.update(_input_opts(s))
         doc["输入"][s.name] = FlowDict(entry)
     if rs.settings:
         doc["设置"] = {k: _plain(v) for k, v in rs.settings.items()}
@@ -354,7 +357,7 @@ class ExprToCell:
     """表达式 -> [(变量, 单元格文本)]; 不在表格子集里的写法报错。"""
 
     def __init__(self, rs: RuleSet) -> None:
-        exists = {f"{s.name}.{EXIST_VAR}" for s in rs.lookups}
+        exists = {f"{s.name}.{EXIST_VAR}" for s in rs.inputs}
         derived = {k for k, _ in rs.derived}
         self.names = set(rs.variables) | derived | exists | {BASE_DATE_VAR}
         self.boolish = derived | exists
@@ -613,10 +616,11 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = "输入"
-    opt_cols = list(CONCAT_OPTS) if any(_concat_opts(s) for s in rs.inputs) else []
+    used = {k for s in rs.inputs for k in _input_opts(s)}
+    opt_cols = ([APPEND_KEY] if APPEND_KEY in used else []) + (list(CONCAT_OPTS) if used & set(CONCAT_OPTS) else [])
     ws.append(["名称", "匹配", "重复键", *opt_cols, "文件", "说明"])
     for s in rs.inputs:
-        opts = _concat_opts(s)
+        opts = _input_opts(s)
         ws.append(
             [s.name, _match_text(s, primary), None if s.primary else s.dup_policy]
             + [opts.get(k) for k in opt_cols]
@@ -722,8 +726,8 @@ def _structure_diff(a: RuleSet, b: RuleSet, res: DiffResult) -> None:
         if (sa.primary, sa.keys, sa.dup_policy) != (sb.primary, sb.keys, sb.dup_policy):
             ka, kb = sa.keys or PRIMARY_WORD, sb.keys or PRIMARY_WORD
             res.differences.append(f"输入「{n}」: A 匹配 {ka} / {sa.dup_policy}, B {kb} / {sb.dup_policy}")
-        elif _concat_opts(sa) != _concat_opts(sb):
-            res.differences.append(f"输入「{n}」的拼接选项: A {_concat_opts(sa)}, B {_concat_opts(sb)}")
+        elif _input_opts(sa) != _input_opts(sb):
+            res.differences.append(f"输入「{n}」的选项: A {_input_opts(sa)}, B {_input_opts(sb)}")
         if sa.path != sb.path:
             res.notes.append(f"输入「{n}」的默认文件不同: A {sa.path}, B {sb.path}")
     for k in sorted(set(a.settings) | set(b.settings)):
