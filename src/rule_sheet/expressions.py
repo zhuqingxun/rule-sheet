@@ -418,31 +418,40 @@ def outside_strings(text: str, fn: Callable[[str], str]) -> str:
     return "".join(out)
 
 
-def eval_expr(expr: str, ns: Namespace) -> Any:
-    """求值表达式。变量名按长度降序替换, 防止 `金额` 吃掉 `主表.金额`。
+def substitute_names(expr: str, names: Iterable[str]) -> tuple[str, dict[str, str]]:
+    """把表达式里的变量名换成安全标识符 (按长度降序, 防止 `金额` 吃掉 `主表.金额`), 连接词换成 and / or / not,
+    `N天` 换成 _days(N); 引号字符串原样保留。返回 (替换后的文本, {标识符: 原名})。
 
     反引号包裹的名字 (如 `本期.金额(万元)`) 原样整体查找, 给含特殊符号、启发式认不出的字段名用。
+    求值 (eval_expr) 与 YAML -> Excel 的转换 (convert) 共用这一步。
     """
-    local: dict[str, Any] = {}
+    known = set(names)
+    used: dict[str, str] = {}
 
     def quoted(m: re.Match[str]) -> str:
         name = m.group(1).strip()
-        if name not in ns:
+        if name not in known:
             raise ValueError(f"表达式求值失败: {expr!r} (反引号里的变量「{name}」未定义)")
-        local[_ident(name)] = ns[name]
+        used[_ident(name)] = name
         return _ident(name)
 
     def substitute(seg: str) -> str:
         seg = _BACKTICK_RE.sub(quoted, seg)
-        for name in sorted(ns, key=len, reverse=True):
+        for name in sorted(known, key=len, reverse=True):
             pattern = r"(?<![\w.])" + re.escape(name) + r"(?![\w.])"
             seg, n = re.subn(pattern, _ident(name), seg)
             if n:
-                local[_ident(name)] = ns[name]
+                used[_ident(name)] = name
         seg = _DAYS_RE.sub(r"_days(\1)", seg)
         return _KEYWORD_RE.sub(lambda m: _KEYWORDS[m.group(1)], seg)
 
-    text = outside_strings(expr, substitute).strip()  # 开头的 非 换成 not 后会带出前导空格, ast 会当成缩进
+    return outside_strings(expr, substitute).strip(), used  # 开头的 非 换成 not 后会带出前导空格, ast 会当成缩进
+
+
+def eval_expr(expr: str, ns: Namespace) -> Any:
+    """求值表达式: 名字替换 (substitute_names) 后交给受限 eval。"""
+    text, used = substitute_names(expr, ns)
+    local: dict[str, Any] = {ident: ns[name] for ident, name in used.items()}
     local.update(FUNCS)
     local.update(_HELPERS)
     local[NULL_WORD] = NULL

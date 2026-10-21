@@ -20,7 +20,7 @@ uv 项目, src 布局, `rule-sheet` 命令, pytest 套件。2026-10-19 从 `D:/C
 | `src/rule_sheet/loaders.py` | `load_excel_rules` / `load_yaml_rules` -> `RuleSet` |
 | `src/rule_sheet/engine.py` | `build_namespace` / `apply_rules` / `run_tests` / `run` 整体流程 / 写出 |
 | `src/rule_sheet/style.py` | 规则工作簿的版式规范 (列类型配色 / 列宽区间 / 换行行高 / 冻结 / `=` 格存文本), `style_rules_workbook` 给样例生成脚本用, `format_workbook` 给 `rule-sheet format` 用; 表头定位复用 `loaders._parse_header` |
-| `src/rule_sheet/convert.py` | Excel -> YAML 无损导出 (`CellTranslator.cell` 对照 `unary_test` 逐形态翻译, 续行 -> `任一满足`), 两份规则文件的语义比对 `diff_rules` (结构逐项比 + 用例合并后在两套规则上各跑一次比输出与命中, 抽样等价不是证明) |
+| `src/rule_sheet/convert.py` | Excel -> YAML 无损导出 (`CellTranslator.cell` 对照 `unary_test` 逐形态翻译, 续行 -> `任一满足`); YAML -> Excel 只对表格子集 (`ExprToCell` 在 `substitute_names` 之后对 AST 做模式匹配: 比较 / 链式区间 / in / 属于 / 文本函数 / 判空 / 裸布尔名, 顶层 `任一满足` -> 续行, 同一变量的上下界合成区间, 其它报错指向变量定义); 两份规则文件的语义比对 `diff_rules` (结构逐项比 + 用例合并后在两套规则上各跑一次比输出与命中, 抽样等价不是证明) |
 | `src/rule_sheet/cli.py` | `rule-sheet run|test|format|export|diff` |
 | `examples/customer-sync/` | 自带样例: 两份数据 + 决策表 + YAML + Gherkin + 生成脚本 (逐列合并的 `优先级` 策略) |
 | `examples/status-machine/` | 第二个样例: 字段名含 `-` / 输出格 `清空` / 命中策略 `首次命中` (2026-10-19 为 issue #1-#4 加); 0.3 (issue #5-#8) 扩成: 决策表同 ID 续行表达跨变量 OR、变量定义里 `且` / `或`、测试 sheet 表头从第 1 行开始 |
@@ -55,7 +55,7 @@ uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/c
 - **内嵌测试复用引擎**: `run_tests` 把每条用例构造成 1 行的 `Namespace`, 走同一套 `add_derived(lenient=True)` + `apply_rules`。改 `apply_rules` 语义会同时影响真实数据与用例
 - **两前端的分叉点** (改一边必须查另一边):
   - 条件: Excel 每个输入格一个 `cell_condition` (走 `unary_test`), 相邻同 ID 行合成 `any_of([all_of(行)...])`; YAML 整棵 `当:` 树一个 `build_condition` (走 `eval_expr`)。决策表正文先由 `loaders.read_decision_rows` 读成 `RawRule` (原始格值), 加载器与导出器共用; **新增单元格形态要同步 `convert.CellTranslator.cell` 和 `tests/test_convert.py` 的逐形态对照表** (翻出来的表达式必须在含空值的数据上与 `unary_test` 的 mask 一致)
-  - 两种写法的同步: Excel 是源, `rule-sheet export` 生成 YAML (生成物, 文件头标「请勿手改」), `rule-sheet diff` 对账; 三个样例的手写 `rules.yaml` 不由导出覆盖, 由 `test_convert.py` 用 diff 守住与 Excel 一致。设计见 `docs/设计架构.md` 5.15
+  - 两种写法的同步: Excel 是源, `rule-sheet export` 生成 YAML (生成物, 文件头标「请勿手改」), `rule-sheet diff` 对账; YAML -> Excel 只对表格子集, 新增表达式函数或单元格形态时 `ExprToCell` 与 `CellTranslator` 两个方向都要加 (测试里两个方向各有一张逐形态对照表, 都要求翻过去的结果在含空值的数据上 mask 一致); 三个样例的手写 `rules.yaml` 不由导出覆盖, 由 `test_convert.py` 用 diff 守住与 Excel 一致, 并要求它们都在表格子集内 (YAML -> Excel 往返一致)。设计见 `docs/设计架构.md` 5.15
   - `rs.variables` (用例未给即视为空的变量清单): Excel 取表头输入列 + `find_names` 扫描输入格 / 输出格 / 派生变量表达式得到的列 (`..` 区间语法前先补空格, 扫描器的边界不认 `.` 前缀); YAML 靠 `expressions.find_names` 扫描 `当` / `则` / `变量` 的文本 (名字可含 `-` `/` 全角括号, `-`/`/` 后紧跟 `别名.`/数字/已知名字才算运算符; 反引号包裹的整体算一个名字; 引号字符串不扫)。YAML 里新增写变量名的位置要同步进这段扫描。扫描器宁可少认不可多认: 多认会把 `本期.金额-上期.金额` 整体当成空变量, 测试静默算错
   - `rs.outputs` 顺序: Excel 按表头输出列; YAML 按 `则:` 首次出现
   - 测试列名校验 (`loaders._check_test_columns`) 两边共用: 期望列 ⊆ 输出列, 输入列 ⊆ 变量 ∪ 派生 ∪ `<参照表名>.存在` ∪ `基准日期` ∪ `<主表名>.<输出列>`

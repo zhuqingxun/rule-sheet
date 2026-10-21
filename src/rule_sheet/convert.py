@@ -2,6 +2,8 @@
 
 - Excel 决策表 -> YAML (export_workbook): 无损。单元格文法的每一种形态都对应一条表达式, 翻译函数对照
   conditions.unary_test 逐分支写, 续行翻成 任一满足。导出的 YAML 是生成物: 源仍是 Excel, 改了 Excel 重新导出。
+- YAML -> Excel (yaml_to_workbook): 只对「表格子集」成立, 每个条件必须是一个变量上的一元测试 (比较 / 区间 /
+  属于 / 文本函数 / 判空 / 裸布尔名), 顶层 任一满足 翻成续行; 其它写法报错并指向变量定义。
 - 两份规则文件的语义比对 (diff_rules): 结构逐项比 (输入 / 设置 / 变量 / 命中策略 / 规则 / 输出列 / 用例);
   条件是编译好的函数比不了文本, 改为把两边的测试用例合并, 每条在两套规则上各跑一次, 比实际输出和命中 ID
   (按用例交叉验证, 是抽样等价, 不是证明)。
@@ -9,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import numbers
 import re
 from dataclasses import dataclass, field
@@ -17,11 +20,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from openpyxl import Workbook
 
 from .conditions import _CMP_RE, _NULL_TESTS, _RANGE_RE, _TEXT_TEST_RE
 from .engine import apply_rules, case_namespace, fmt, same
-from .expressions import FUNCS, split_top_level
-from .loaders import RawRule, load_excel_raw, load_rules
+from .expressions import FUNCS, TEXT_FUNCS, split_top_level, substitute_names
+from .loaders import RawRule, load_excel_raw, load_rules, load_yaml_rules
 from .model import (
     BASE_DATE_VAR,
     BLANK_WORDS,
@@ -33,6 +37,7 @@ from .model import (
     RuleSet,
     TestCase,
 )
+from .style import style_rules_workbook
 
 _DATE_TEXT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CMP_OPS = {"=": "==", "==": "==", "<>": "!=", "!=": "!=", ">": ">", ">=": ">=", "<": "<", "<=": "<="}
@@ -257,14 +262,368 @@ def excel_to_yaml(path: str | Path) -> str:
 
 
 def export_workbook(path: str | Path, out: str | Path | None = None) -> Path:
-    """Excel 规则工作簿 -> YAML 文件; 默认写到同目录同名 .yaml。"""
+    """Excel 规则工作簿 -> YAML (默认同目录同名 .yaml); YAML -> Excel 规则工作簿 (默认同目录同名 .xlsx)。"""
     src = Path(path)
-    if src.suffix.lower() != ".xlsx":
-        raise ValueError(f"export 现在只支持 Excel 规则工作簿 (.xlsx) 导出成 YAML: {src.name}")
-    target = Path(out) if out else src.with_suffix(".yaml")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(excel_to_yaml(src), encoding="utf-8")
-    return target
+    suffix = src.suffix.lower()
+    if suffix == ".xlsx":
+        target = Path(out) if out else src.with_suffix(".yaml")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(excel_to_yaml(src), encoding="utf-8")
+        return target
+    if suffix in (".yaml", ".yml"):
+        target = Path(out) if out else src.with_suffix(".xlsx")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        wb = yaml_to_workbook(src)
+        try:
+            wb.save(target)
+        except PermissionError as exc:
+            raise PermissionError(f"无法写入 {target}: 文件可能正被 Excel 打开, 关闭后再试") from exc
+        return target
+    raise ValueError(f"export 只认 .xlsx (导出成 YAML) 或 .yaml (导出成 Excel): {src.name}")
+
+
+# ---------------------------------------------------------------------------
+# YAML -> Excel: 表格子集
+# ---------------------------------------------------------------------------
+
+UNARY_HINT = (
+    "决策表单元格只放一元测试 (一个变量对字面量 / 变量的一次比较、区间、属于 / in、文本函数、判空、裸布尔名); "
+    "其它写法先在 变量: 里起个名字, 条件里只引用它"
+)
+_FLIP = {ast.Lt: ast.Gt, ast.LtE: ast.GtE, ast.Gt: ast.Lt, ast.GtE: ast.LtE, ast.Eq: ast.Eq, ast.NotEq: ast.NotEq}
+_OP_TEXT = {ast.Eq: "=", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}
+
+
+def _is_number_text(t: str) -> bool:
+    try:
+        float(t)
+        return True
+    except ValueError:
+        return False
+
+
+def cell_literal(s: str) -> str:
+    """字符串字面值写进单元格: 能裸写就裸写, 会被单元格文法认成别的东西的加引号。"""
+    t = s.strip()
+    needs = (
+        t != s
+        or not t
+        or t in BLANK_WORDS
+        or t in _NULL_TESTS
+        or t == NULL_WORD
+        or "," in t
+        or t.startswith("not(")
+        or t[0] in "\"'"
+        or bool(_CMP_RE.match(t) or _RANGE_RE.match(t) or _TEXT_TEST_RE.match(t) or _DATE_TEXT_RE.match(t))
+        or _is_number_text(t)
+        or t in TRUE_WORDS
+        or t in FALSE_WORDS
+    )
+    return _quote(s) if needs else s
+
+
+class ExprToCell:
+    """表达式 -> [(变量, 单元格文本)]; 不在表格子集里的写法报错。"""
+
+    def __init__(self, rs: RuleSet) -> None:
+        exists = {f"{s.name}.{EXIST_VAR}" for s in rs.lookups}
+        derived = {k for k, _ in rs.derived}
+        self.names = set(rs.variables) | derived | exists | {BASE_DATE_VAR}
+        self.boolish = derived | exists
+        self.used: dict[str, str] = {}
+        self.where = ""
+        self.expr = ""
+
+    def _fail(self, why: str) -> ValueError:
+        return ValueError(f"{self.where}: 条件 {self.expr!r} 转不成决策表单元格 ({why}); {UNARY_HINT}")
+
+    def _var(self, node: ast.AST) -> str | None:
+        return self.used.get(node.id) if isinstance(node, ast.Name) else None
+
+    def _lit(self, node: ast.AST) -> str:
+        """字面量 / 另一个变量名 / 空 / 日期("...") 在单元格里的写法。"""
+        if isinstance(node, ast.Constant):
+            v = node.value
+            if isinstance(v, str):
+                return cell_literal(v)
+            if isinstance(v, bool) or not isinstance(v, numbers.Real):
+                raise self._fail(f"不认识的字面量 {v!r}")
+            return _number_text(v)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub) and isinstance(node.operand, ast.Constant):
+            return "-" + self._lit(node.operand)
+        if isinstance(node, ast.Name):
+            if node.id == NULL_WORD:
+                return NULL_WORD
+            if node.id in TRUE_WORDS or node.id in FALSE_WORDS:
+                return "是" if node.id in TRUE_WORDS else "否"
+            var = self._var(node)
+            if var:
+                return var
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "日期"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            return node.args[0].value
+        raise self._fail("右侧只能是字面量、另一个变量、空 或 日期(...)")
+
+    def _compare(self, node: ast.Compare) -> tuple[str, str]:
+        if len(node.ops) == 2:  # 链式区间 a <= x <= b / b >= x >= a
+            lo, var_node, hi = node.left, node.comparators[0], node.comparators[1]
+            var = self._var(var_node)
+            ops = tuple(type(o) for o in node.ops)
+            if var is None:
+                raise self._fail("链式比较中间必须是变量")
+            if all(o in (ast.Lt, ast.LtE) for o in ops):
+                left, right = ops
+            elif all(o in (ast.Gt, ast.GtE) for o in ops):
+                lo, hi = hi, lo
+                left, right = _FLIP[ops[1]], _FLIP[ops[0]]
+            else:
+                raise self._fail("链式比较只能是 a <= x <= b 这种区间")
+            open_b = "[" if left is ast.LtE else "("
+            close_b = "]" if right is ast.LtE else ")"
+            return var, f"{open_b}{self._lit(lo)}..{self._lit(hi)}{close_b}"
+        if len(node.ops) != 1:
+            raise self._fail("链式比较只支持两段 (区间)")
+        op, left, right = type(node.ops[0]), node.left, node.comparators[0]
+        if op in (ast.In, ast.NotIn):
+            var = self._var(left)
+            if var is None or not isinstance(right, (ast.Tuple, ast.List)):
+                raise self._fail("in 的左边必须是变量, 右边必须是字面量列表")
+            items = ", ".join(self._lit(e) for e in right.elts)
+            return var, items if op is ast.In else f"not({items})"
+        var = self._var(left)
+        other = right
+        if var is None:
+            var, other = self._var(right), left
+            if var is None or op not in _FLIP:
+                raise self._fail("比较的一侧必须是变量")
+            op = _FLIP[op]
+        if isinstance(other, ast.Name) and other.id == NULL_WORD:
+            if op not in (ast.Eq, ast.NotEq):
+                raise self._fail("空 只能和 == / != 搭配")
+            return var, f"{_OP_TEXT[op]} {NULL_WORD}"
+        if isinstance(other, ast.Name) and (other.id in TRUE_WORDS or other.id in FALSE_WORDS):
+            if var not in self.boolish or op not in (ast.Eq, ast.NotEq):
+                raise self._fail("和 是 / 否 比较只对 <参照表>.存在 与派生变量成立 (单元格里的 是 在文本列上是文字)")
+            truthy = (other.id in TRUE_WORDS) == (op is ast.Eq)
+            return var, "是" if truthy else "否"
+        text = self._lit(other)
+        if op is ast.Eq:
+            return var, f"= {text}" if self._var(other) else text
+        return var, f"{_OP_TEXT[op]} {text}"
+
+    def _call(self, node: ast.Call) -> tuple[str, str]:
+        fn = node.func.id if isinstance(node.func, ast.Name) else ""
+        if not node.args or node.keywords:
+            raise self._fail(f"函数 {fn} 的参数不对")
+        var = self._var(node.args[0])
+        if var is None:
+            raise self._fail(f"函数 {fn} 的第一个参数必须是变量")
+        rest = [self._lit(a) for a in node.args[1:]]
+        if fn == "属于":
+            return var, ", ".join(rest)
+        if fn in ("为空", "非空") and not rest:
+            return var, fn
+        if fn in TEXT_FUNCS:
+            return var, f"{fn} {', '.join(rest)}"
+        raise self._fail(f"函数 {fn} 不能直接当单元格条件")
+
+    def _is_null_test(self, node: ast.AST) -> tuple[str, bool] | None:
+        """x == 空 / x != 空 / 为空(x) / 非空(x) -> (变量, 是否判空)。"""
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            left, right = node.left, node.comparators[0]
+            if isinstance(right, ast.Name) and right.id == NULL_WORD and self._var(left):
+                return self._var(left) or "", type(node.ops[0]) is ast.Eq
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("为空", "非空"):
+            if len(node.args) == 1 and self._var(node.args[0]):
+                return self._var(node.args[0]) or "", node.func.id == "为空"
+        return None
+
+    def _node(self, node: ast.AST) -> list[tuple[str, str]]:
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And):
+            if len(node.values) == 2 and isinstance(node.values[1], ast.UnaryOp):
+                nt = self._is_null_test(node.values[0])
+                if nt and not nt[1] and isinstance(node.values[1].op, ast.Not):  # x != 空 且 非 (...) = 单元格 not(...)
+                    inner = self._node(node.values[1].operand)
+                    if len(inner) == 1 and inner[0][0] == nt[0]:
+                        return [(nt[0], f"not({inner[0][1]})")]
+            return [c for v in node.values for c in self._node(v)]
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            parts = [self._node(v) for v in node.values]
+            if all(len(p) == 1 for p in parts) and len({p[0][0] for p in parts}) == 1:
+                return [(parts[0][0][0], ", ".join(p[0][1] for p in parts))]  # 同一变量的 或 = 枚举
+            raise self._fail("或 的两侧是不同变量; 跨变量的或写成规则顶层的 任一满足:, 转成决策表的续行")
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            var = self._var(node.operand)
+            if var and var in self.boolish:
+                return [(var, "否")]
+            nt = self._is_null_test(node.operand)
+            if nt:
+                return [(nt[0], "非空" if nt[1] else "为空")]
+            raise self._fail(
+                "非 是纯取反 (空值行也为真), 单元格的 not(...) 只对有值的格成立, 两者不等价; "
+                "写成 x != 值 / x not in (...), 或 x != 空 且 非 (...)"
+            )
+        if isinstance(node, ast.Name):
+            var = self._var(node)
+            if var and var in self.boolish:
+                return [(var, "是")]
+            raise self._fail("裸变量名当条件只对 <参照表>.存在 与派生变量成立")
+        if isinstance(node, ast.Compare):
+            return [self._compare(node)]
+        if isinstance(node, ast.Call):
+            return [self._call(node)]
+        raise self._fail("不是一元测试")
+
+    def cells(self, expr: str, where: str) -> list[tuple[str, str]]:
+        """一条表达式 -> [(变量, 单元格文本)]; 且 连接的几个一元测试拆成几格。"""
+        self.where, self.expr = where, expr
+        text, self.used = substitute_names(expr, self.names)
+        try:
+            tree = ast.parse(text, mode="eval").body
+        except SyntaxError as exc:
+            raise ValueError(f"{where}: 表达式语法错误 {expr!r} ({exc.msg})") from exc
+        return self._node(tree)
+
+    def _flat_all(self, node: Any, where: str) -> list[tuple[str, str]]:
+        if isinstance(node, str):
+            return self.cells(node, where)
+        if isinstance(node, list):
+            return [c for n in node for c in self._flat_all(n, where)]
+        if isinstance(node, dict) and len(node) == 1:
+            key, val = next(iter(node.items()))
+            if key == "全部满足":
+                return self._flat_all(val, where)
+            if key == "不满足":
+                inner = self._flat_all(val, where)
+                if len(inner) == 1 and inner[0][1] in ("为空", "非空", f"= {NULL_WORD}", f"!= {NULL_WORD}"):
+                    var, cell = inner[0]
+                    return [(var, "非空" if cell in ("为空", f"= {NULL_WORD}") else "为空")]
+                raise ValueError(
+                    f"{where}: 不满足: 是纯取反 (空值行也为真), 只有包着判空时才能转成决策表; "
+                    f"其它情况写成 x != 值 / x not in (...), 或放进变量定义"
+                )
+            raise ValueError(
+                f"{where}: 嵌套在条件里面的 {key}: 转不成决策表 (任一满足 只能放在规则条件的顶层, 对应续行)"
+            )
+        raise ValueError(f"{where}: 无法识别的条件写法: {node!r}")
+
+    @staticmethod
+    def _as_range(a: str, b: str) -> str | None:
+        """同一变量的两个比较 (下界 + 上界) 合成区间格。"""
+        ma, mb = _CMP_RE.match(a), _CMP_RE.match(b)
+        if not ma or not mb:
+            return None
+        lo = next(((m.group(1), m.group(2)) for m in (ma, mb) if m.group(1) in (">", ">=")), None)
+        hi = next(((m.group(1), m.group(2)) for m in (ma, mb) if m.group(1) in ("<", "<=")), None)
+        if not lo or not hi:
+            return None
+        return f"{'[' if lo[0] == '>=' else '('}{lo[1].strip()}..{hi[1].strip()}{']' if hi[0] == '<=' else ')'}"
+
+    def _merge(self, cells: list[tuple[str, str]], where: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for var, cell in cells:
+            if var in out:
+                merged = self._as_range(out[var], cell)
+                if merged is None:
+                    raise ValueError(
+                        f"{where}: 变量「{var}」在同一条规则里有两个条件 ({out[var]} 与 {cell}), "
+                        f"决策表一列只放一格; 写成区间 / 枚举, 或放进变量定义"
+                    )
+                out[var] = merged
+            else:
+                out[var] = cell
+        return out
+
+    def branches(self, cond: Any, where: str) -> list[dict[str, str]]:
+        """规则的 当: -> 若干分支 (每个分支: 变量 -> 单元格文本); 顶层 任一满足 的每一支与其余条件各组成一行。"""
+        items = cond if isinstance(cond, list) else [cond]
+        fixed: list[tuple[str, str]] = []
+        alternatives: list[list[tuple[str, str]]] | None = None
+        for item in items:
+            if isinstance(item, dict) and len(item) == 1 and next(iter(item)) == "任一满足":
+                if alternatives is not None:
+                    raise ValueError(f"{where}: 一条规则只能有一个顶层 任一满足 (对应续行)")
+                val = next(iter(item.values()))
+                alternatives = [self._flat_all(alt, where) for alt in (val if isinstance(val, list) else [val])]
+            else:
+                fixed.extend(self._flat_all(item, where))
+        rows = [fixed] if alternatives is None else [fixed + alt for alt in alternatives]
+        return [self._merge(r, where) for r in rows]
+
+
+def _excel_value(v: Any) -> Any:
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return datetime(v.year, v.month, v.day)
+    return v
+
+
+def yaml_to_workbook(path: str | Path) -> Workbook:
+    """YAML 规则文件 -> 规则工作簿 (五张 sheet, 版式按 style 规范套好)。条件不在表格子集里的报错。"""
+    src = Path(path)
+    doc = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
+    rs = load_yaml_rules(src)
+    conv = ExprToCell(rs)
+    primary = rs.primary.name
+    columns: list[str] = []
+    parsed: list[tuple[str, Any, list[dict[str, str]], dict[str, Any], str]] = []
+    for order, r in enumerate(doc.get("规则") or []):
+        rid = str(r.get("编号", f"R{order + 1}"))
+        branches = conv.branches(r.get("当") or [], f"规则 {rid}")
+        for b in branches:
+            columns.extend(v for v in b if v not in columns)
+        parsed.append((rid, r.get("优先级", 1000 + order), branches, dict(r.get("则") or {}), str(r.get("名称", ""))))
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "输入"
+    ws.append(["名称", "匹配", "重复键", "文件", "说明"])
+    for s in rs.inputs:
+        ws.append([s.name, _match_text(s, primary), None if s.primary else s.dup_policy, s.path, None])
+    if rs.settings:
+        ws = wb.create_sheet("设置")
+        ws.append(["设置项", "值", "说明"])
+        for k, v in rs.settings.items():
+            ws.append([k, _excel_value(v), None])
+    if rs.derived:
+        ws = wb.create_sheet("变量定义")
+        ws.append(["变量", "定义", "说明"])
+        for k, v in rs.derived:
+            ws.append([k, v, None])
+
+    ws = wb.create_sheet("决策表")
+    ws.append(["命中策略", rs.hit_policy])
+    ws.append(["规则ID", "优先级", *["输入"] * len(columns), *["输出"] * len(rs.outputs), "说明"])
+    ws.append(["规则ID", "优先级", *columns, *rs.outputs, "说明"])
+    for rid, priority, branches, then, desc in parsed:
+        first = ws.max_row + 1
+        for i, b in enumerate(branches):
+            cells = [b.get(c) for c in columns]
+            if i == 0:
+                ws.append([rid, priority, *cells, *[_excel_value(then.get(o)) for o in rs.outputs], desc or None])
+            else:
+                ws.append([None, None, *cells, *[None] * len(rs.outputs), None])
+        if len(branches) > 1:
+            ws.merge_cells(start_row=first, start_column=1, end_row=first + len(branches) - 1, end_column=1)
+            ws.merge_cells(start_row=first, start_column=2, end_row=first + len(branches) - 1, end_column=2)
+
+    if rs.tests:
+        keys: list[str] = []
+        for t in rs.tests:
+            keys.extend(k for k in t.inputs if k not in keys)
+        ws = wb.create_sheet("测试")
+        ws.append(["用例", *["输入"] * len(keys), *["期望"] * len(rs.outputs), "说明"])
+        ws.append(["用例", *keys, *rs.outputs, "说明"])
+        for t in rs.tests:
+            row = [t.name, *[_excel_value(t.inputs.get(k)) for k in keys]]
+            ws.append([*row, *[_excel_value(t.expected.get(o)) for o in rs.outputs], None])
+    style_rules_workbook(wb)
+    return wb
 
 
 # ---------------------------------------------------------------------------

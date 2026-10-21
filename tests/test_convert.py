@@ -5,10 +5,11 @@ from datetime import datetime
 
 import pandas as pd
 import pytest
+from openpyxl import load_workbook
 
 from rule_sheet import cli
 from rule_sheet.conditions import to_mask, unary_test
-from rule_sheet.convert import CellTranslator, diff_rules, excel_to_yaml, export_workbook
+from rule_sheet.convert import CellTranslator, ExprToCell, diff_rules, excel_to_yaml, export_workbook
 from rule_sheet.engine import run, run_tests
 from rule_sheet.expressions import eval_expr
 from rule_sheet.loaders import load_rules
@@ -178,9 +179,11 @@ def test_diff_reports_each_kind_of_change(tmp_path):
     assert "规则 S5 只在 A 里" in res.differences and "规则 S6 只在 B 里" in res.differences
 
 
-def test_export_rejects_yaml_and_cli(tmp_path, capsys):
-    with pytest.raises(ValueError, match="只支持 Excel"):
-        export_workbook(YAML_RULES)
+def test_export_cli_both_directions(tmp_path, capsys):
+    shutil.copy(YAML_RULES, tmp_path / "rules.yaml")
+    assert cli.main(["export", str(tmp_path / "rules.yaml")]) == 0
+    out = capsys.readouterr().out
+    assert "已导出" in out and "rules.xlsx" in out and (tmp_path / "rules.xlsx").exists()
     src = tmp_path / "r.xlsx"
     shutil.copy(TAGS_EXCEL, src)
     assert cli.main(["export", str(src)]) == 0
@@ -190,7 +193,166 @@ def test_export_rejects_yaml_and_cli(tmp_path, capsys):
     assert "语义一致" in capsys.readouterr().out
     assert cli.main(["diff", str(src), str(STATUS_YAML)]) == 1
     assert "发现" in capsys.readouterr().out
-    assert cli.main(["export", str(YAML_RULES)]) == 2
+    assert cli.main(["export", str(tmp_path / "nope.txt")]) == 2
+
+
+# ---------------------------------------------------------------------------
+# YAML -> Excel: 表格子集
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def to_cell():
+    rs = RuleSet(
+        inputs=[InputSpec("客户", primary=True), InputSpec("本月", keys=[("客户编号", "客户编号")])],
+        settings={},
+        derived=[("拟任人有变化", "客户.电话 != 本月.电话"), ("偏差率", "客户.金额 * 2")],
+        hit_policy="优先级",
+        rules=[],
+        outputs=[],
+        variables=["客户.状态", "客户.电话", "本月.电话", "客户.上次活跃", "客户.等级", "本月.存在", "偏差率"],
+    )
+    return ExprToCell(rs)
+
+
+@pytest.mark.parametrize(
+    ("expr", "cells"),
+    [
+        ('客户.状态 == "活跃"', [("客户.状态", "活跃")]),
+        ('客户.状态 != "休眠"', [("客户.状态", "!= 休眠")]),
+        ('"活跃" == 客户.状态', [("客户.状态", "活跃")]),
+        ("偏差率 > 0.05", [("偏差率", "> 0.05")]),
+        ("0.05 < 偏差率", [("偏差率", "> 0.05")]),
+        ("偏差率 >= 11", [("偏差率", ">= 11")]),
+        ("0.02 <= 偏差率 <= 0.05", [("偏差率", "[0.02..0.05]")]),
+        ("0.02 < 偏差率 <= 0.05", [("偏差率", "(0.02..0.05]")]),
+        ("0.05 >= 偏差率 > 0.02", [("偏差率", "(0.02..0.05]")]),
+        ('属于(客户.状态, "VIP", "活跃")', [("客户.状态", "VIP, 活跃")]),
+        ('属于(客户.状态, "活跃", 空)', [("客户.状态", "活跃, 空")]),
+        ('客户.状态 in ("VIP", "活跃")', [("客户.状态", "VIP, 活跃")]),
+        ('客户.状态 not in ("VIP", "活跃")', [("客户.状态", "not(VIP, 活跃)")]),
+        ("本月.电话 == 空", [("本月.电话", "= 空")]),
+        ("本月.电话 != 空", [("本月.电话", "!= 空")]),
+        ("为空(本月.电话)", [("本月.电话", "为空")]),
+        ("非空(本月.电话)", [("本月.电话", "非空")]),
+        ("非 (本月.电话 == 空)", [("本月.电话", "非空")]),
+        ("本月.存在 == 是", [("本月.存在", "是")]),
+        ("本月.存在 == 否", [("本月.存在", "否")]),
+        ("本月.存在 != 是", [("本月.存在", "否")]),
+        ("本月.存在", [("本月.存在", "是")]),
+        ("非 本月.存在", [("本月.存在", "否")]),
+        ("拟任人有变化", [("拟任人有变化", "是")]),
+        ("本月.电话 != 客户.电话", [("本月.电话", "!= 客户.电话")]),
+        ("本月.电话 == 客户.电话", [("本月.电话", "= 客户.电话")]),
+        ('包含(客户.状态, "活", "休")', [("客户.状态", "包含 活, 休")]),
+        ('不包含(客户.状态, "眠")', [("客户.状态", "不包含 眠")]),
+        ('开头是(客户.状态, "活")', [("客户.状态", "开头是 活")]),
+        ('客户.上次活跃 > 日期("2026-10-08")', [("客户.上次活跃", "> 2026-10-08")]),
+        ('客户.上次活跃 == 日期("2026-10-08")', [("客户.上次活跃", "2026-10-08")]),
+        ('客户.状态 == "007"', [("客户.状态", '"007"')]),  # 裸 007 会被单元格当成数字, 必须加引号
+        ('客户.状态 == "2026-10-08"', [("客户.状态", '"2026-10-08"')]),
+        ('客户.状态 == "VIP 小幅偏差, 关注"', [("客户.状态", '"VIP 小幅偏差, 关注"')]),
+        ('客户.状态 == "是"', [("客户.状态", '"是"')]),
+        ('客户.状态 == "空"', [("客户.状态", '"空"')]),
+        ('客户.状态 == "-"', [("客户.状态", '"-"')]),
+        ('客户.状态 == "> 1"', [("客户.状态", '"> 1"')]),
+        ('客户.状态 != 空 且 非 (包含(客户.状态, "活"))', [("客户.状态", "not(包含 活)")]),
+        ("偏差率 != 空 且 非 (偏差率 > 0.05)", [("偏差率", "not(> 0.05)")]),
+        ("偏差率 > 10 或 偏差率 == 空", [("偏差率", "> 10, = 空")]),
+        ('客户.状态 == "活跃" 且 偏差率 > 0.05', [("客户.状态", "活跃"), ("偏差率", "> 0.05")]),
+    ],
+)
+def test_expr_to_cells(to_cell, ns, expr, cells):
+    """表格子集里的每种表达式都有对应的单元格, 且翻回去的 mask 与原表达式在含空值的数据上一致。"""
+    assert to_cell.cells(expr, "规则 R") == cells
+    want = to_mask(eval_expr(expr, ns), ns).tolist()
+    got = [True] * 5
+    for var, cell in cells:
+        got = [g and h for g, h in zip(got, unary_test(cell, ns[var], ns).tolist(), strict=True)]
+    assert got == want, (expr, cells)
+
+
+@pytest.mark.parametrize(
+    ("expr", "why"),
+    [
+        ("abs(客户.金额 - 本月.金额) > 1", "比较的一侧必须是变量"),
+        ("偏差率 * 2 > 1", "比较的一侧必须是变量"),
+        ("偏差率 * 2", "不是一元测试"),
+        ('非 (客户.状态 == "活跃")', "纯取反"),
+        ("偏差率 > 0.05 或 本月.存在", "跨变量的或"),
+        ("偏差率 > 空", "空 只能和 == / != 搭配"),
+        ("客户.状态 == 是", "是 / 否 比较只对"),
+        ("客户.状态", "裸变量名"),
+        ("天数差(基准日期, 客户.上次活跃) > 1", "比较的一侧必须是变量"),
+        ("天数差(客户.上次活跃, 基准日期)", "不能直接当单元格条件"),
+        ("0.02 <= 偏差率 >= 0.01", "区间"),
+        ("偏差率 >", "表达式语法错误"),
+    ],
+)
+def test_expr_outside_subset_is_rejected(to_cell, expr, why):
+    with pytest.raises(ValueError, match=why):
+        to_cell.cells(expr, "规则 R")
+
+
+def test_branches_merge_ranges_and_split_alternatives(to_cell):
+    assert to_cell.branches(["偏差率 >= 0.02", "偏差率 <= 0.05"], "R") == [{"偏差率": "[0.02..0.05]"}]
+    assert to_cell.branches(["偏差率 > 0.02", "偏差率 < 0.05"], "R") == [{"偏差率": "(0.02..0.05)"}]
+    cond = ["本月.存在 == 是", {"任一满足": ["本月.电话 == 空", ["客户.电话 == 空", "偏差率 > 1"]]}]
+    rows = to_cell.branches(cond, "R")
+    assert rows == [{"本月.存在": "是", "本月.电话": "= 空"}, {"本月.存在": "是", "客户.电话": "= 空", "偏差率": "> 1"}]
+    assert to_cell.branches({"不满足": "本月.电话 == 空"}, "R") == [{"本月.电话": "非空"}]
+    assert to_cell.branches("本月.存在", "R") == [{"本月.存在": "是"}]
+    with pytest.raises(ValueError, match="两个条件"):
+        to_cell.branches(["偏差率 > 0.02", "偏差率 > 0.05"], "R")
+    with pytest.raises(ValueError, match="只能有一个顶层 任一满足"):
+        to_cell.branches([{"任一满足": ["本月.存在"]}, {"任一满足": ["拟任人有变化"]}], "R")
+    with pytest.raises(ValueError, match="嵌套在条件里面的 任一满足"):
+        to_cell.branches([{"任一满足": [{"任一满足": ["本月.存在"]}]}], "R")
+    with pytest.raises(ValueError, match="不满足: 是纯取反"):
+        to_cell.branches({"不满足": '客户.状态 == "活跃"'}, "R")
+
+
+@SAMPLES
+def test_yaml_to_excel_round_trips(excel, yaml_file, data_dir, tmp_path):
+    """手写 YAML -> Excel: 结构能加载、内嵌用例全过、与手写 Excel 和 YAML 都语义一致、跑真实数据结果相同;
+    再 Excel -> YAML -> Excel 一圈仍然一致。"""
+    out = export_workbook(yaml_file, tmp_path / "from_yaml.xlsx")
+    wb = load_workbook(out)
+    assert wb.sheetnames[0] == "输入" and "决策表" in wb.sheetnames and "测试" in wb.sheetnames
+    assert wb["决策表"].freeze_panes and wb["决策表"].cell(1, 1).value == "命中策略"  # 版式已套
+    rs = load_rules(out)
+    failed = [(o.name, o.problems, o.error) for o in run_tests(rs) if not o.passed]
+    assert rs.tests and not failed, failed
+    assert diff_rules(out, excel).same, diff_rules(out, excel).differences
+    assert diff_rules(out, yaml_file).same, diff_rules(out, yaml_file).differences
+    a = run(yaml_file, dry_run=True).out
+    b = run(out, base_dir=data_dir, dry_run=True).out
+    cols = list(rs.outputs) + ["命中规则"]
+    pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
+    again = export_workbook(export_workbook(excel, tmp_path / "a.yaml"), tmp_path / "b.xlsx")
+    assert diff_rules(again, excel).same
+
+
+def test_yaml_to_excel_keeps_continuation_rows_merged(tmp_path):
+    out = export_workbook(STATUS_YAML, tmp_path / "s.xlsx")
+    ws = load_workbook(out)["决策表"]
+    merged = {str(r) for r in ws.merged_cells.ranges}
+    assert merged == {"A6:A7", "B6:B7"}  # S3 的 任一满足 两支 -> 两行, 规则ID / 优先级 合并
+    assert [ws.cell(r, 1).value for r in range(4, 10)] == ["S1", "S2", "S3", None, "S4", "S5"]
+    assert ws.cell(6, 3).value == "= 上期.类别-会议" or ws.cell(6, 4).value == "= 上期.类别-会议"
+
+
+def test_yaml_outside_subset_reports_rule(tmp_path):
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "输入:\n  客户: {匹配: 主表}\n  本月: {匹配: k}\n规则:\n"
+        "  - 编号: X\n    当: [abs(本月.金额 - 客户.金额) > 1]\n    则: {y: 1}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="规则 X: 条件 .* 转不成决策表单元格 .*变量: 里起个名字"):
+        export_workbook(p, tmp_path / "r.xlsx")
+    with pytest.raises(ValueError, match="export 只认"):
+        export_workbook(tmp_path / "r.txt")
 
 
 def test_exported_yaml_round_trips_through_loader(tmp_path):
