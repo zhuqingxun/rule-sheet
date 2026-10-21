@@ -57,6 +57,8 @@ def test_not_equal_is_null_safe_like_cells(ns_two_rows):
     assert eval_expr("本月.金额 != 1", ns_two_rows).tolist() == [True, False, True]  # NaN != 1 不成立
     assert eval_expr("a != 1", {"a": None}) is False and eval_expr("a != 1", {"a": 2}) is True
     assert eval_expr("a == b", {"a": None, "b": None}) is False
+    assert eval_expr("a > 1", {"a": None}) is False  # 标量 None > 1 在 Python 里直接报错, 这里是「不成立」
+    assert eval_expr("a > b", {"a": pd.Series([1, 2]), "b": None}).tolist() == [False, False]
 
 
 def test_chained_comparison_and_in(ns_two_rows):
@@ -95,6 +97,99 @@ def test_syntax_and_truth_value_errors_are_readable(ns_two_rows):
         eval_expr("本月.金额 >", ns_two_rows)
     with pytest.raises(ValueError, match="真假判断.*且 / 或 / 非"):
         eval_expr("1 if 本月.存在 else 0", ns_two_rows)
+
+
+# ---------------------------------------------------------------------------
+# 0.6: 文本函数 / 拼接 / 如果 / 数字 / N天 (issue #9 #10 #11 #14)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ns_text():
+    idx = pd.RangeIndex(5)
+    return {
+        "本期.岗位名称": pd.Series(["集团CEO", "终端BG-总裁助理", None, "法务部", 7], index=idx, dtype=object),
+        "本期.一层组织": pd.Series(["1-集团", "2-终端", "3-华东", None, "11-控制"], index=idx, dtype=object),
+        "本期.职级": pd.Series(["22级", "23", "P24", None, 25], index=idx, dtype=object),
+        "本期.推荐时间": pd.Series(
+            pd.to_datetime(["2026-06-01", "2025-10-01", "2025-09-30", None, "2026-10-01"]), index=idx
+        ),
+        "本期.工号": pd.Series(["007", None, "009", "010", "011"], index=idx, dtype=object),
+        "基准日期": pd.Timestamp("2026-10-01"),
+    }
+
+
+def test_text_functions_are_literal_and_null_safe(ns_text):
+    """包含 / 开头是 / 结尾是 按字面匹配 (不是正则), 任一子串命中即真; 空值不成立, 否定形式也不成立。"""
+    assert eval_expr('包含(本期.岗位名称, "CEO", "总裁")', ns_text).tolist() == [True, True, False, False, False]
+    assert eval_expr('不包含(本期.岗位名称, "助理")', ns_text).tolist() == [True, False, False, True, True]
+    assert eval_expr('开头是(本期.一层组织, "2-", "3-")', ns_text).tolist() == [False, True, True, False, False]
+    assert eval_expr('开头不是(本期.一层组织, "1")', ns_text).tolist() == [False, True, True, False, False]
+    assert eval_expr('结尾是(本期.一层组织, "东")', ns_text).tolist() == [False, False, True, False, False]
+    assert eval_expr('结尾不是(本期.一层组织, "东")', ns_text).tolist() == [True, True, False, False, True]
+    assert eval_expr('非 包含(本期.岗位名称, "CEO")', ns_text).tolist() == [False, True, True, True, True]  # 纯取反
+    assert eval_expr('包含(本期.工号, "00")', ns_text).tolist() == [True, False, True, False, False]  # 文本列保住前导零
+    by_column = eval_expr("包含(本期.工号, 本期.工号)", ns_text)  # 子串也可以是列
+    assert by_column.tolist() == [True, False, True, True, True]
+    assert eval_expr('包含(x, ".")', {"x": "a.b"}) is True and eval_expr('包含(x, ".")', {"x": "ab"}) is False
+    assert eval_expr('包含(x, "a")', {"x": None}) is False and eval_expr('不包含(x, "a")', {"x": None}) is False
+    assert eval_expr("不包含(x, y)", {"x": "abc", "y": None}) is False  # 否定形式下子串为空也不成立
+    assert eval_expr('包含(x, "7")', {"x": 7.0}) is True  # 非文本值按 7 而不是 7.0 匹配
+    with pytest.raises(ValueError, match="至少要给一个文本"):
+        eval_expr("包含(本期.岗位名称)", ns_text)
+    with pytest.raises(ValueError, match="参数不能是 空"):
+        eval_expr('包含(空, "a")', ns_text)
+
+
+def test_concat_treats_null_as_empty_and_all_null_as_null(ns_text):
+    out = eval_expr('拼接(本期.一层组织, "/", 本期.岗位名称)', ns_text)
+    assert out.tolist()[:2] == ["1-集团/集团CEO", "2-终端/终端BG-总裁助理"]
+    assert out.tolist()[2:] == ["3-华东/", "/法务部", "11-控制/7"]
+    out = eval_expr("拼接(本期.工号, 本期.工号)", ns_text)
+    assert out.iloc[0] == "007007" and pd.isna(out.iloc[1])  # 全部参数为空 -> 空值, 不是空串
+    assert eval_expr('拼接("x", 1.0, 日期)', {"日期": pd.Timestamp("2026-10-01")}) == "x12026-10-01"
+    assert eval_expr('拼接("x", 本期.名称) == "xa"', {"本期.名称": pd.Series(["a", None], dtype=object)}).tolist() == [
+        True,
+        False,
+    ]
+    with pytest.raises(ValueError, match="参数不能是 空"):
+        eval_expr("拼接(本期.工号, 空)", ns_text)
+
+
+def test_if_is_vectorized_and_null_goes_to_else(ns_text):
+    out = eval_expr('如果(本期.一层组织 != 空, 拼接(本期.一层组织, "/", 本期.岗位名称), 本期.岗位名称)', ns_text)
+    assert out.tolist() == ["1-集团/集团CEO", "2-终端/终端BG-总裁助理", "3-华东/", "法务部", "11-控制/7"]
+    nested = eval_expr('如果(包含(本期.岗位名称, "CEO"), "高管", "普通")', ns_text)
+    assert nested.tolist()[:3] == ["高管", "普通", "普通"]
+    out = eval_expr("如果(数字(本期.职级) >= 23, 数字(本期.职级), 空)", ns_text)
+    assert out.tolist()[1:3] == [23.0, 24.0] and out.iloc[0] is None and out.iloc[3] is None  # 分支可以写 空
+    assert eval_expr('如果(本期.岗位名称 == "法务部", 1, 2.5)', ns_text).tolist() == [2.5, 2.5, 2.5, 1.0, 2.5]
+    out = eval_expr('如果(本期.岗位名称 == "集团CEO", 本期.推荐时间, 基准日期)', ns_text)  # 日期列 / 日期标量混用
+    assert out.tolist()[:2] == [pd.Timestamp("2026-06-01"), pd.Timestamp("2026-10-01")]
+    assert eval_expr("如果(是, 1, 2)", {"x": 1}) == 1 and eval_expr("如果(否, 1, 2)", {"x": 1}) == 2  # 标量
+    assert eval_expr("如果(x > 1, 'a', 'b')", {"x": None}) == "b"  # 条件为空 = 假
+    assert eval_expr("如果(x > 1, 'a', 'b')", {"x": pd.Series([None, 2], dtype=object)}).tolist() == ["b", "a"]
+    with pytest.raises(ValueError, match="三元写法用 如果"):
+        eval_expr("1 if 本期.推荐时间 else 0", ns_text)
+
+
+def test_number_extracts_first_number_from_text(ns_text):
+    out = eval_expr("数字(本期.职级)", ns_text)
+    assert out.tolist()[:3] == [22.0, 23.0, 24.0] and pd.isna(out.iloc[3]) and out.iloc[4] == 25
+    assert eval_expr("数字(本期.职级) >= 23", ns_text).tolist() == [False, True, True, False, True]
+    assert eval_expr("数字(x)", {"x": "第3档-2024"}) == 3 and eval_expr("数字(x)", {"x": "P1.5"}) == 1.5
+    assert eval_expr("数字(x)", {"x": "无"}) is None and eval_expr("数字(x)", {"x": 4}) == 4
+    assert eval_expr("数字(x)", {"x": pd.Series([1.5, None])}).tolist()[0] == 1.5
+
+
+def test_days_literal(ns_text):
+    assert eval_expr("本期.推荐时间 >= 基准日期 - 365天", ns_text).tolist() == [True, True, False, False, True]
+    assert eval_expr("基准日期 - 1.5天", ns_text) == pd.Timestamp("2026-09-29 12:00:00")
+    assert eval_expr("天数差(基准日期 + 30天, 基准日期)", ns_text) == 30
+    assert eval_expr("天数差(基准日期, 本期.推荐时间) <= 365", ns_text).tolist() == [True, True, False, False, True]
+    ns = {"本期.30天内": pd.Series([True, False]), "基准日期": pd.Timestamp("2026-10-01")}
+    assert eval_expr("本期.30天内", ns).tolist() == [True, False]  # 列名里的 天 不受影响
+    assert eval_expr('x == "3天"', {"x": "3天"}) is True  # 字符串里的不改写
 
 
 def test_truth_treats_null_as_false():

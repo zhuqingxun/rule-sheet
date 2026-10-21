@@ -18,7 +18,15 @@ from typing import Any
 
 import pandas as pd
 
-from .expressions import dangling_name, eval_expr, literal, split_top_level, truth, undefined_variable
+from .expressions import (
+    TEXT_FUNCS,
+    dangling_name,
+    eval_expr,
+    literal,
+    split_top_level,
+    truth,
+    undefined_variable,
+)
 from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, NULL, NULL_WORD, Condition, Namespace
 
 Mask = pd.Series
@@ -26,6 +34,24 @@ Mask = pd.Series
 _RANGE_RE = re.compile(r"^([\[\(])\s*(.+?)\s*\.\.\s*(.+?)\s*([\]\)])$")
 _CMP_RE = re.compile(r"^(>=|<=|!=|<>|==|=|>|<)\s*(.+)$")
 _NULL_TESTS = ("为空", "非空", NULL_WORD)
+# 子串类关键字: `包含 终端, 法务` / `开头是(2-, 3-)`; 关键字后面要有空白或括号,
+# 单元格值恰好是「包含测试」这种文本仍按字面量走
+_TEXT_TEST_RE = re.compile(rf"^({'|'.join(TEXT_FUNCS)})(?:\s+(.+)|\s*\((.+)\))$", re.S)
+
+
+def _text_args(parts: list[str], ns: Namespace) -> list[Any]:
+    """子串类关键字的参数: 引号去掉取原文, 命中变量名的换成那一列; 不走 literal(), 否则 01 会变成数字 1。"""
+    args: list[Any] = []
+    for p in parts:
+        if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'":
+            args.append(p[1:-1])
+        elif p in ns:
+            args.append(ns[p])
+        elif dangling_name(p, ns):
+            raise undefined_variable(p)
+        else:
+            args.append(p)
+    return args
 
 
 def _both_present(var: pd.Series, rhs: Any) -> Mask:
@@ -53,6 +79,11 @@ def unary_test(cell: Any, var: pd.Series, ns: Namespace) -> Mask:
         neg = ~unary_test(inner, var, ns)
         # not(...) 只对有值的格成立; 对 为空/非空 本身取反时保持纯否定
         return neg if inner in _NULL_TESTS else neg & var.notna()
+    if m := _TEXT_TEST_RE.match(s):
+        args = _text_args(split_top_level(m.group(2) or m.group(3)), ns)
+        if not args:
+            raise ValueError(f"单元格条件 {s!r}: {m.group(1)} 后面要写至少一个文本, 如 {m.group(1)} 终端, 法务")
+        return truth(TEXT_FUNCS[m.group(1)](var, *args))
     parts = split_top_level(s)
     if len(parts) > 1:  # 枚举: 任一满足
         m = pd.Series(False, index=var.index)

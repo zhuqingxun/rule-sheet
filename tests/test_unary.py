@@ -103,6 +103,30 @@ def test_not_excludes_nulls_except_for_null_tests():
     assert hits("not(非空)", s("a", None)) == [False, True]
 
 
+def test_text_keywords_in_cells():
+    """0.6: 包含 / 不包含 / 开头是 / 开头不是 / 结尾是 / 结尾不是, 后面跟空格或括号; 逗号分隔的几项任一命中。
+    参数取原文 (01 不会变成数字 1), 命中变量名的换成那一列; 空值不成立; not(...) 照常只对有值的格成立。"""
+    var = s("集团CEO", "终端BG-总裁助理", None, "法务部")
+    assert hits("包含 CEO, 总裁", var) == [True, True, False, False]
+    assert hits("包含(CEO, 总裁)", var) == [True, True, False, False]
+    assert hits("不包含 助理", var) == [True, False, False, True]
+    assert hits("not(包含 CEO)", var) == [False, True, False, True]
+    assert hits("开头是 集团", var) == [True, False, False, False]
+    assert hits("开头不是 集团, 终端", var) == [False, False, False, True]
+    assert hits("结尾是 部", var) == [False, False, False, True]
+    assert hits("结尾不是 部", var) == [True, True, False, False]
+    assert hits('包含 "CEO, 总裁"', var) == [False, False, False, False]  # 引号里的逗号不拆
+    assert hits("包含测试", s("包含测试", "x")) == [True, False]  # 没有空格 / 括号就是普通文字
+    assert hits('"包含 CEO"', s("包含 CEO", "x")) == [True, False]
+    codes = s("007", None, "010", "1")
+    assert hits("开头是 01", codes) == [False, False, True, False]  # 01 保持文本, 不会变成数字 1
+    assert hits("包含 主表.工号", codes, {"主表.工号": s("7", "x", "1", None)}) == [True, False, True, False]
+    with pytest.raises(KeyError, match="未定义的变量「主表.工资」"):
+        hits("包含 主表.工资", codes, {"主表.工号": s("7", "x", "1", None)})
+    with pytest.raises(ValueError, match="包含 后面要写至少一个文本"):
+        hits("包含 ,", var)
+
+
 def test_bool_column_accepts_yes_no_words():
     var = pd.Series([True, False, True])
     assert hits("是", var) == [True, False, True]

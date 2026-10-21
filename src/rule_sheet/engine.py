@@ -13,13 +13,16 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from .conditions import ns_index, resolve_output, to_mask
-from .expressions import eval_expr, is_na
+from .expressions import eval_expr, is_na, text_of
 from .loaders import load_rules
 from .model import (
     BASE_DATE_VAR,
     CLEAR,
+    DEFAULT_JOIN_SEP,
     EXIST_VAR,
     EXPECT_NULL_WORDS,
+    JOIN_POLICY,
+    JOIN_SEP_KEY,
     NULL,
     NULL_WORD,
     TRUE_WORDS,
@@ -145,6 +148,30 @@ def rule_mask(rule: Rule, ns: Namespace, index: pd.Index) -> Mask:
     return m
 
 
+def _join_hits(
+    rs: RuleSet,
+    col: str,
+    ordered: list[Rule],
+    masks: dict[str, Mask],
+    cur: pd.Series,
+    output_of: Any,
+) -> pd.Series:
+    """多条拼接: 按优先级顺序把每条命中规则对该列写的值接到后面; 清空 / 算出空值的规则不贡献。"""
+    sep = str(rs.settings.get(JOIN_SEP_KEY, DEFAULT_JOIN_SEP))
+    acc = pd.Series([None] * len(cur), index=cur.index, dtype=object)
+    for rule in ordered:
+        val = output_of(rule, col)
+        if val is None or val is CLEAR:
+            continue
+        if not isinstance(val, pd.Series):
+            val = pd.Series([val] * len(cur), index=cur.index, dtype=object)
+        texts = pd.Series([None if is_na(v) else text_of(v) for v in val.tolist()], index=cur.index, dtype=object)
+        add = masks[rule.rule_id] & texts.notna()
+        prefix = acc.map(lambda s: "" if s is None else s + sep)
+        acc = acc.mask(add, prefix + texts.fillna(""))
+    return cur.mask(acc.notna(), acc)
+
+
 def apply_rules(
     rs: RuleSet,
     ns: Namespace,
@@ -157,6 +184,8 @@ def apply_rules(
     命中策略 唯一: 任何行命中多条即报错。
     命中策略 首次命中: 每行只算优先级数字最小的那条命中 (同优先级按书写顺序), 其余规则对该行视为未命中;
         之后走与 优先级 相同的逐列合并, 此时每行至多一条规则, 结果就是该规则的输出 (- 的列保持原值)。
+    命中策略 多条拼接: 每个输出列把所有命中规则写的值按优先级顺序 (同优先级按书写顺序) 用分隔符拼成一个文本,
+        替换原值; 没写该列的规则不参与, 没有任何命中的行不动。
     """
     index = ns_index(ns)
     dup = sorted({r.rule_id for r in rs.rules if sum(x.rule_id == r.rule_id for x in rs.rules) > 1})
@@ -183,17 +212,23 @@ def apply_rules(
             taken = taken | effective
             masks[rule.rule_id] = effective
 
+    def output_of(rule: Rule, col: str) -> Any:
+        try:
+            return resolve_output(rule.outputs.get(col), ns)
+        except KeyError as exc:
+            raise KeyError(f"规则 {rule.rule_id} 输出「{col}」: {exc.args[0]}") from exc
+
     results: dict[str, pd.Series] = {}
     for col in rs.outputs:
         cur = originals.get(col)
         if cur is None:
             cur = pd.Series([None] * len(index), index=index, dtype=object)
         cur = cur.astype(object)
+        if rs.hit_policy == JOIN_POLICY:
+            results[col] = _join_hits(rs, col, ordered, masks, cur, output_of)
+            continue
         for rule in reversed(ordered):  # 优先级数字大的先写, 小的最后写并覆盖
-            try:
-                val = resolve_output(rule.outputs.get(col), ns)
-            except KeyError as exc:
-                raise KeyError(f"规则 {rule.rule_id} 输出「{col}」: {exc.args[0]}") from exc
+            val = output_of(rule, col)
             if val is None:
                 continue
             if val is CLEAR:
@@ -231,15 +266,7 @@ def same(a: Any, b: Any) -> bool:
 
 
 def fmt(x: Any) -> str:
-    if is_na(x):
-        return "空"
-    if isinstance(x, (pd.Timestamp, datetime, date)):
-        return pd.Timestamp(x).strftime("%Y-%m-%d")
-    if isinstance(x, bool):
-        return "是" if x else "否"
-    if isinstance(x, numbers.Real) and float(x).is_integer():
-        return str(int(x))
-    return str(x)
+    return "空" if is_na(x) else text_of(x)
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +297,8 @@ def run_tests(rs: RuleSet) -> list[TestOutcome]:
                 val = None
             if val is None and name in derived_names:
                 continue  # 派生变量留空 = 没给, 按表达式推导 (Excel 测试 sheet 每列每行都在, 留空不能算「给了空值」)
+            if isinstance(val, (date, datetime)):  # Excel 日期格 / YAML 日期 -> 与真实数据的日期列同型, 才能做大小比较
+                val = pd.Timestamp(val)
             dtype = object if isinstance(val, str) or val is None else None
             ns[name] = pd.Series([val], index=index, dtype=dtype)
         ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.settings.get(BASE_DATE_VAR) or date.today()))

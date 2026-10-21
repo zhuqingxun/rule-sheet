@@ -10,6 +10,9 @@ YAML_RULES = EXAMPLE_DIR / "rules.yaml"
 STATUS_DIR = EXAMPLES / "status-machine"
 STATUS_EXCEL = STATUS_DIR / "规则_决策表.xlsx"
 STATUS_YAML = STATUS_DIR / "rules.yaml"
+TAGS_DIR = EXAMPLES / "position-tags"
+TAGS_EXCEL = TAGS_DIR / "规则_决策表.xlsx"
+TAGS_YAML = TAGS_DIR / "rules.yaml"
 
 
 @pytest.fixture

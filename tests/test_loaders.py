@@ -135,8 +135,27 @@ def test_yaml_rule_without_then_and_policy_validation(tmp_path):
 
 
 def test_excel_policy_validation(tmp_path):
-    with pytest.raises(ValueError, match="未知的命中策略「first」"):
+    with pytest.raises(ValueError, match="未知的命中策略「first」.*优先级 / 唯一 / 首次命中 / 多条拼接"):
         load_rules(make_workbook(tmp_path / "bad.xlsx", [["命中策略", "first"], ["规则ID"], ["规则ID"]]))
+
+
+def test_join_policy_validation(tmp_path):
+    """多条拼接 下输出格写 清空 没有意义, 报错; 没用这个策略却设了「拼接分隔符」多半是策略名写错, 也报错。"""
+    cleared = [*HEADER, ["R1", 1, "x", "-", "清空"]]
+    with pytest.raises(ValueError, match="规则 R1 输出「标记」= 清空: 命中策略 多条拼接 只拼接有值的输出"):
+        load_rules(make_workbook(tmp_path / "a.xlsx", [["命中策略", "多条拼接"], *cleared]))
+    with pytest.raises(ValueError, match="设置了「拼接分隔符」, 但命中策略是「优先级」"):
+        load_rules(make_workbook(tmp_path / "b.xlsx", RULE, settings=[["拼接分隔符", ";"]]))
+    ok = make_workbook(tmp_path / "c.xlsx", [["命中策略", "多条拼接"], *RULE], settings=[["拼接分隔符", ";"]])
+    rs = load_rules(ok)
+    assert rs.hit_policy == "多条拼接" and rs.settings["拼接分隔符"] == ";"
+    p = tmp_path / "r.yaml"
+    p.write_text("命中策略: 多条拼接\n规则:\n  - 编号: A\n    则: {y: =空}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="规则 A 输出「y」= =空: 命中策略 多条拼接"):
+        load_yaml_rules(p)
+    p.write_text("设置: {拼接分隔符: '/'}\n规则:\n  - 则: {y: 1}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="设置了「拼接分隔符」"):
+        load_yaml_rules(p)
 
 
 INPUTS = [["名称", "匹配", "文件"], ["主表", "主表", "a.xlsx"], ["本月", "k", "b.xlsx"]]

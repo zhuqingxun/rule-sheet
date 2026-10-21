@@ -19,9 +19,13 @@ from .expressions import FUNCS, find_names, split_top_level
 from .model import (
     BASE_DATE_VAR,
     BLANK_WORDS,
+    CLEAR_WORDS,
     DUP_POLICIES,
     EXIST_VAR,
     HIT_POLICIES,
+    JOIN_POLICY,
+    JOIN_SEP_KEY,
+    NULL_WORD,
     PRIMARY_WORD,
     SETTING_KEYS,
     Condition,
@@ -43,6 +47,22 @@ def _check_policy(policy: Any) -> str:
     if name not in HIT_POLICIES:
         raise ValueError(f"未知的命中策略「{name}」, 只认: {' / '.join(HIT_POLICIES)}")
     return name
+
+
+def _check_join_policy(rs: RuleSet) -> RuleSet:
+    """多条拼接 下输出格写 清空 没有意义 (拼接只接有值的); 没用这个策略却设了分隔符, 多半是策略名写错了。"""
+    if rs.hit_policy != JOIN_POLICY:
+        if JOIN_SEP_KEY in rs.settings:
+            raise ValueError(f"设置了「{JOIN_SEP_KEY}」, 但命中策略是「{rs.hit_policy}」而不是 {JOIN_POLICY}")
+        return rs
+    for rule in rs.rules:
+        for col, v in rule.outputs.items():
+            if _text(v).lstrip("=").strip() in CLEAR_WORDS | {NULL_WORD}:
+                raise ValueError(
+                    f"规则 {rule.rule_id} 输出「{col}」= {_text(v)}: "
+                    f"命中策略 {JOIN_POLICY} 只拼接有值的输出, 不能写 清空"
+                )
+    return rs
 
 
 def _text(v: Any) -> str:
@@ -378,8 +398,10 @@ def load_excel_rules(path: Path) -> RuleSet:
         if not tests:
             raise ValueError("「测试」sheet 里没有任何用例 (「用例」列为空的行会跳过); 写上用例, 或删掉这张 sheet")
 
-    return RuleSet(
-        inputs, settings, derived, hit_policy, rules, output_names, tests, source=path.name, variables=variables
+    return _check_join_policy(
+        RuleSet(
+            inputs, settings, derived, hit_policy, rules, output_names, tests, source=path.name, variables=variables
+        )
     )
 
 
@@ -393,7 +415,9 @@ def _yaml_inputs(doc: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
     if "输入" in doc and "匹配" in doc:
         raise ValueError("YAML 里 输入: 和旧写法 匹配: 不能同时出现")
     if "输入" not in doc:
-        return _legacy_inputs(dict(doc.get("匹配") or {}))
+        inputs, settings = _legacy_inputs(dict(doc.get("匹配") or {}))
+        settings.update(_check_settings(dict(doc.get("设置") or {}), "YAML 设置:"))  # 设置: 不能因为没写 输入: 就被忽略
+        return inputs, settings
     rows = []
     for name, v in (doc.get("输入") or {}).items():
         if isinstance(v, dict):
@@ -451,16 +475,18 @@ def load_yaml_rules(path: Path) -> RuleSet:
     if "测试" in doc and not tests:
         raise ValueError("YAML 的 测试: 下没有任何用例; 写上用例, 或删掉这个键")
 
-    return RuleSet(
-        inputs,
-        settings,
-        derived,
-        _check_policy(doc.get("命中策略")),
-        rules,
-        outputs,
-        tests,
-        source=path.name,
-        variables=variables,
+    return _check_join_policy(
+        RuleSet(
+            inputs,
+            settings,
+            derived,
+            _check_policy(doc.get("命中策略")),
+            rules,
+            outputs,
+            tests,
+            source=path.name,
+            variables=variables,
+        )
     )
 
 

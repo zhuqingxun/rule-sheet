@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import ast
 import copy
+import numbers
 import operator
 import re
 from collections.abc import Callable, Iterable
+from datetime import date, datetime
 from functools import lru_cache
 from types import CodeType
 from typing import Any
@@ -60,6 +62,42 @@ def _present(x: Any) -> Any:
     return x.notna() if isinstance(x, pd.Series) else not is_na(x)
 
 
+def text_of(x: Any) -> str:
+    """非空值的文本形态, 拼接 / 子串匹配 / 审计列共用: 整数不带 .0, 日期 yyyy-mm-dd, 布尔 是/否。"""
+    if isinstance(x, bool):
+        return "是" if x else "否"
+    if isinstance(x, (pd.Timestamp, datetime, date)):
+        return pd.Timestamp(x).strftime("%Y-%m-%d")
+    if isinstance(x, numbers.Real) and float(x).is_integer():
+        return str(int(x))
+    return str(x)
+
+
+def _texts(x: Any) -> Any:
+    """Series -> 文本 Series (空值保持 None); 标量 -> str 或 None。
+
+    不能用 Series.map: 它会把返回的 None 变成 NaN, 后面的 `is None` 判断就失效。
+    """
+    if isinstance(x, pd.Series):
+        return pd.Series([None if is_na(v) else text_of(v) for v in x.tolist()], index=x.index, dtype=object)
+    return None if is_na(x) else text_of(x)
+
+
+def _rowwise(fn: Callable[..., Any], *args: Any) -> Any:
+    """把 fn 逐行应用到若干参数上: Series 按行取值, 标量广播; 全是标量时直接调用。"""
+    series = [a for a in args if isinstance(a, pd.Series)]
+    if not series:
+        return fn(*args)
+    index = series[0].index
+    cols = [a.tolist() if isinstance(a, pd.Series) else [a] * len(index) for a in args]
+    return pd.Series([fn(*row) for row in zip(*cols, strict=True)], index=index)
+
+
+def _reject_null(fname: str, *args: Any) -> None:
+    if any(a is NULL for a in args):
+        raise ValueError(f"{fname}() 的参数不能是 空 (空 只能和 == / != 搭配)")
+
+
 # ---------------------------------------------------------------------------
 # 可用函数
 # ---------------------------------------------------------------------------
@@ -68,6 +106,91 @@ def _present(x: Any) -> Any:
 def _days_between(later: Any, earlier: Any) -> Any:
     delta = pd.to_datetime(later) - pd.to_datetime(earlier)
     return delta.dt.days if isinstance(delta, pd.Series) else delta.days
+
+
+def _days(n: Any) -> pd.Timedelta:
+    """时长字面量 `365天` 改写成 _days(365): 基准日期 - 365天 / 本期.推荐时间 + 30天。"""
+    return pd.Timedelta(days=float(n))
+
+
+def _text_test(fname: str, pred: Callable[[str, str], bool], *, negate: bool = False) -> Callable[..., Any]:
+    """子串类函数: 包含(x, 文本, ...) 任一命中即真; 否定形式 (不包含) 要求 x 有值且全部不命中。
+
+    空值参与不成立 (与比较一致): x 为空, 或否定形式下任一文本为空, 结果都是 False。文本按字面匹配, 不是正则。
+    非文本列先转成文本 (整数不带 .0, 日期 yyyy-mm-dd), 所以 包含(编码, "00") 对数值列也能用。
+    """
+
+    def one(v: str | None, *needles: str | None) -> bool:
+        if v is None or (negate and any(n is None for n in needles)):
+            return False
+        hit = any(n is not None and pred(v, n) for n in needles)
+        return (not hit) if negate else hit
+
+    def f(x: Any, *needles: Any) -> Any:
+        if not needles:
+            raise ValueError(f"{fname}(x, 文本, ...) 至少要给一个文本")
+        _reject_null(fname, x, *needles)
+        return _rowwise(one, _texts(x), *[_texts(n) for n in needles])
+
+    return f
+
+
+def _concat(*parts: Any) -> Any:
+    """拼接(a, b, ...): 空值当作空字符串; 全部参数都为空时结果是空值 (而不是空串, 否则审计列与写出的文件对不上)。"""
+    if not parts:
+        raise ValueError("拼接() 至少要给一个参数")
+    _reject_null("拼接", *parts)
+
+    def one(*vals: str | None) -> str | None:
+        texts = [v for v in vals if v is not None]
+        return "".join(texts) if texts else None
+
+    return _rowwise(one, *[_texts(p) for p in parts])
+
+
+_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _number(x: Any) -> Any:
+    """数字(x): 文本里的第一个数 (22级 / P23 / 第3档 -> 22 / 23 / 3), 取不到为空; 数值原样返回。
+
+    逐行生效, 是不开放的 float() / int() 的替代。
+    """
+    _reject_null("数字", x)
+
+    def one(v: Any) -> Any:
+        if is_na(v):
+            return None
+        if isinstance(v, numbers.Real) and not isinstance(v, bool):
+            return v
+        m = _NUMBER_RE.search(str(v))
+        if not m:
+            return None
+        f = float(m.group(0))
+        return int(f) if f.is_integer() else f
+
+    res = _rowwise(one, x)
+    return pd.to_numeric(res) if isinstance(res, pd.Series) else res
+
+
+def _if(cond: Any, a: Any, b: Any) -> Any:
+    """如果(条件, 真值, 假值): 向量化三元。条件走真值归一 (空值算假), 分支可以是标量 / 列 / 空。"""
+    t = truth(cond)
+    series = [v for v in (a, b) if isinstance(v, pd.Series)]
+    if not isinstance(t, pd.Series):
+        if not series:
+            return a if t else b
+        t = pd.Series(t, index=series[0].index)
+    index = t.index
+
+    def column(v: Any) -> pd.Series:
+        if v is NULL:
+            return pd.Series([None] * len(index), index=index, dtype=object)
+        if isinstance(v, pd.Series):
+            return v
+        return pd.Series([v] * len(index), index=index)
+
+    return column(a).where(t, column(b))
 
 
 def _notna(x: Any) -> Any:
@@ -108,6 +231,16 @@ def _isin(x: Any, *values: Any) -> Any:
     return _in(x, values)
 
 
+# 决策表单元格也认这几个关键字: `包含 终端, 法务` = 包含(列, "终端", "法务")
+TEXT_FUNCS: dict[str, Callable[..., Any]] = {
+    "包含": _text_test("包含", lambda v, n: n in v),
+    "不包含": _text_test("不包含", lambda v, n: n in v, negate=True),
+    "开头是": _text_test("开头是", lambda v, n: v.startswith(n)),
+    "开头不是": _text_test("开头不是", lambda v, n: v.startswith(n), negate=True),
+    "结尾是": _text_test("结尾是", lambda v, n: v.endswith(n)),
+    "结尾不是": _text_test("结尾不是", lambda v, n: v.endswith(n), negate=True),
+}
+
 FUNCS: dict[str, Any] = {
     "abs": abs,
     "round": round,
@@ -118,6 +251,10 @@ FUNCS: dict[str, Any] = {
     "非空": _notna,
     "为空": _isna,
     "属于": _isin,
+    **TEXT_FUNCS,
+    "拼接": _concat,
+    "数字": _number,
+    "如果": _if,
     "是": True,
     "否": False,
     "true": True,
@@ -161,6 +298,11 @@ def _cmp(op: Callable[[Any, Any], Any], symbol: str) -> Callable[[Any, Any], Any
                 raise ValueError(f"空 只能和 == / != 搭配, 不能用 {symbol}")
             other = b if a is NULL else a
             return _isna(other) if op is operator.eq else _notna(other)
+        a_s, b_s = isinstance(a, pd.Series), isinstance(b, pd.Series)
+        if not a_s and not b_s:  # 标量: 先查空再比较, None > 1 在 Python 里直接报错
+            return not is_na(a) and not is_na(b) and bool(op(a, b))
+        if (not a_s and is_na(a)) or (not b_s and is_na(b)):
+            return pd.Series(False, index=(a if a_s else b).index)
         return truth(op(a, b)) & _present(a) & _present(b)
 
     return f
@@ -172,6 +314,7 @@ _HELPERS: dict[str, Any] = {
     "_not": _not,
     "_in": _in,
     "_not_in": _not_in,
+    "_days": _days,
     "_eq": _cmp(operator.eq, "=="),
     "_ne": _cmp(operator.ne, "!="),
     "_lt": _cmp(operator.lt, "<"),
@@ -243,6 +386,9 @@ _STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
 # 中文连接词: 独立成词 (两侧不是名字字符) 才算, `非空(` 里的 非 不受影响
 _KEYWORD_RE = re.compile(r"(?<!\w)(且|或|非)(?!\w)")
 _KEYWORDS = {"且": " and ", "或": " or ", "非": " not "}
+# 时长字面量 `365天` / `1.5天`: 数字紧跟 天, 且 天 后面不再是名字字符 (`天数差(` 不受影响);
+# 变量名已先换成 _vN, 列名含「天」不受影响
+_DAYS_RE = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*天(?!\w)")
 
 
 def _ident(name: str) -> str:
@@ -284,6 +430,7 @@ def eval_expr(expr: str, ns: Namespace) -> Any:
             seg, n = re.subn(pattern, _ident(name), seg)
             if n:
                 local[_ident(name)] = ns[name]
+        seg = _DAYS_RE.sub(r"_days(\1)", seg)
         return _KEYWORD_RE.sub(lambda m: _KEYWORDS[m.group(1)], seg)
 
     text = outside_strings(expr, substitute).strip()  # 开头的 非 换成 not 后会带出前导空格, ast 会当成缩进
@@ -304,7 +451,8 @@ def eval_expr(expr: str, ns: Namespace) -> Any:
     except ValueError as exc:
         if "ambiguous" in str(exc):
             raise ValueError(
-                f"表达式求值失败: {expr!r} (对整列做了真假判断; 条件组合用 且 / 或 / 非, 不支持 if-else 三元写法)"
+                f"表达式求值失败: {expr!r} (对整列做了真假判断; 条件组合用 且 / 或 / 非, "
+                f"三元写法用 如果(条件, 真值, 假值) 而不是 if-else)"
             ) from exc
         raise ValueError(f"表达式求值失败: {expr!r} ({exc})") from exc
     except TypeError as exc:

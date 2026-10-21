@@ -12,10 +12,13 @@ BLANK_WORDS = {"", "-", "—", "任意"}
 NULL_WORD = "空"  # 空值关键字: 条件里与 = / != 搭配判空 (本期.x == 空), 输出格 / 期望格 / 测试输入里就是空值
 CLEAR_WORDS = {"清空", "置空"}  # 输出格: 把目标列写成空值 (区别于 - 的「不改」)
 EXPECT_NULL_WORDS = CLEAR_WORDS | {"为空", NULL_WORD}  # 测试用例期望格: 期望该列为空 (留空仍是「不变」)
-HIT_POLICIES = ("优先级", "唯一", "首次命中")
+HIT_POLICIES = ("优先级", "唯一", "首次命中", "多条拼接")
+JOIN_POLICY = "多条拼接"  # DMN 的 Collect: 每个输出列把所有命中规则的值按优先级顺序用分隔符拼起来 (多标签分类)
+JOIN_SEP_KEY = "拼接分隔符"  # 「设置」里给 多条拼接 用的分隔符
+DEFAULT_JOIN_SEP = "/"
 DUP_POLICIES = ("取第一条", "报错")  # 参照表匹配键重复时
 PRIMARY_WORD = "主表"  # 「输入」里主表那一行的「匹配」写它: 输出的行就是主表的行, 其它输入都对齐到它
-SETTING_KEYS = ("基准日期", "输出")
+SETTING_KEYS = ("基准日期", "输出", JOIN_SEP_KEY)
 EXIST_VAR = "存在"  # 参照表是否匹配到, 实际变量名是 <输入名>.存在
 BASE_DATE_VAR = "基准日期"
 

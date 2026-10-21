@@ -255,6 +255,27 @@ def test_first_match_ties_follow_definition_order(ns_two_rows):
     assert res["x"].tolist() == ["B"] * 3 and hit.tolist() == ["B"] * 3
 
 
+def test_join_policy_concatenates_all_hits_in_priority_order(ns_two_rows):
+    """多条拼接 (issue #16, DMN 的 Collect): 每个输出列把所有命中规则的值按优先级顺序用分隔符接起来并替换原值;
+    没写该列的规则不参与, 算出空值的规则不贡献, 没命中的行不动; 审计列记全部命中。"""
+    r1 = Rule("R1", 1, [cell_condition("主表.状态", "活跃")], {"标签": "高管", "备注": "a"})
+    r2 = Rule("R2", 3, [cell_condition("本月.存在", "是")], {"标签": "直管"})
+    big = '=如果(主表.金额 > 6000, "大客户", 空)'
+    r3 = Rule("R3", 2, [cell_condition("本月.存在", "是")], {"标签": big, "备注": "-"})
+    originals = {"标签": pd.Series(["旧"] * 3), "备注": pd.Series(["旧"] * 3)}
+    rs = make_rs([r1, r2, r3], ["标签", "备注"], hit_policy="多条拼接")
+    res, hit = apply_rules(rs, ns_two_rows, originals)
+    assert res["标签"].tolist() == ["高管/大客户/直管", "旧", "直管"]  # 默认分隔符 /; 行 2 的 R3 算出空, 不贡献
+    assert res["备注"].tolist() == ["a", "旧", "旧"]
+    assert hit.tolist() == ["R1; R3; R2", "", "R3; R2"]
+    rs = make_rs([r1, r2, r3], ["标签", "备注"], hit_policy="多条拼接", settings={"拼接分隔符": "; "})
+    res, _ = apply_rules(rs, ns_two_rows, originals)
+    assert res["标签"].tolist() == ["高管; 大客户; 直管", "旧", "直管"]
+    r4 = Rule("R4", 0, [], {"标签": 7.0, "备注": "本月.电话"})  # 数值 / 复制列 一样进拼接, 7.0 写成 7, 空的列值不贡献
+    res, _ = apply_rules(make_rs([r1, r4], ["标签", "备注"], hit_policy="多条拼接"), ns_two_rows, originals)
+    assert res["标签"].tolist() == ["7/高管", "7", "7"] and res["备注"].tolist() == ["139/a", "138", "旧"]
+
+
 def test_unique_policy_reports_label(ns_two_rows):
     r1 = Rule("R1", 1, [cell_condition("本月.存在", "是")], {"x": "1"})
     r2 = Rule("R2", 2, [expr_condition("主表.金额 > 100")], {"x": "2"})
