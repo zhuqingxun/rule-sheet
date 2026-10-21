@@ -17,6 +17,8 @@ uv run rule-sheet test examples/customer-sync/rules.yaml         # 只跑规则�
 uv run rule-sheet run  examples/status-machine/rules.yaml -i 本期=本期岗位_2026-10.xlsx -i 上期=上期岗位_2026-09.xlsx -o 结果.xlsx
 uv run rule-sheet run  examples/position-tags/rules.yaml         # 第三个样例: 多标签分类 (多条拼接 / 文本关键字 / 清单当参照表)
 uv run rule-sheet format 规则.xlsx                                # 按版式规范重排规则工作簿 (颜色 / 列宽 / 换行 / 冻结)
+uv run rule-sheet export 规则.xlsx                                # Excel 决策表导出成 YAML (无损; 源是 Excel)
+uv run rule-sheet diff   规则.xlsx rules.yaml                     # 两份规则文件语义比对 (结构逐项比 + 用例交叉验证)
 uv run pytest                                                    # 项目测试套件
 ```
 
@@ -47,7 +49,7 @@ uv run pytest                                                    # 项目测试�
 
 1. `规则_决策表.xlsx` 的「决策表」sheet。推荐给业务人员改的形态: 每行一条规则, 蓝色格是条件, 绿色格是命中后写回的值, `-` 表示不关心 / 不改。
 2. 同一个文件的「测试」sheet。每行一个用例, 期望列留空表示「不变」。
-3. `rules.yaml`。同一组规则的 YAML 写法, 条件是完整表达式, 支持 `任一满足` 嵌套。
+3. `rules.yaml`。同一组规则的 YAML 写法, 条件是完整表达式, 支持 `任一满足` 嵌套。两种写法不要都手改: Excel 是源时用 `rule-sheet export` 生成 YAML, `rule-sheet diff` 对账 (使用指南 6.1); 样例里这份是手写的, 由测试用 `diff` 守住它与决策表一致。
 4. `客户同步.feature`。Gherkin 写法, 只做验收说明书, 未接执行器。
 5. `make_samples.py`。重新生成样例数据和决策表 (改了样例设计时才需要)。
 
@@ -141,6 +143,7 @@ src/rule_sheet/
   loaders.py      Excel 决策表 / YAML 两种前端 -> RuleSet
   engine.py       合并两表、派生变量、命中策略合并、审计列、内嵌测试、写出
   style.py        规则工作簿的版式规范 (配色 / 列宽 / 换行 / 冻结), 样例生成与 rule-sheet format 共用
+  convert.py      Excel -> YAML 无损导出 (单元格逐形态翻成表达式), 两份规则文件的语义比对 (结构 + 用例交叉验证)
   cli.py          rule-sheet 命令
 examples/customer-sync/   自带样例 (数据 + 三种写法的规则)
 examples/status-machine/  第二个样例: 字段名含 - / 输出格 清空 / 命中策略 首次命中
@@ -167,8 +170,10 @@ print(res.changed[["客户编号", "命中规则", "变更明细"]])
 | `拼接(a, b, ...)` | 连成一个文本, 空值当空串 (全空为空值) |
 | `如果(条件, 真值, 假值)` | 向量化三元, 条件为空走假分支; 分支可写 `空` |
 | `数字(x)` | 文本里的第一个数 (`22级` → 22), 取不到为空 |
+| `日期(x)` | 日期字面量 `日期("2026-10-01")`, 或把文本日期列转成日期 |
 | `365天` | 时长字面量: `基准日期 - 365天` |
 | 命中策略 `多条拼接` + 设置 `拼接分隔符` | 每个输出列把所有命中规则的值接起来 |
+| `rule-sheet format` / `export` / `diff` | 版式规范一键套用 / Excel 无损导出成 YAML / 两份规则文件语义比对 |
 
 清单 / 白名单文件不用新语法: 把它声明成参照表 (按编码对齐到主表), `<清单名>.存在` 就是「在不在清单里」, 样例 position-tags 的 G3。顺手修的: YAML 没写 `输入:` 时 `设置:` 以前会被忽略, 现在生效; 表达式里标量 `None > 1` 以前报错, 现在和其它比较一样「不成立」。
 

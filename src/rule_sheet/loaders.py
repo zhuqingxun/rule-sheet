@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -284,7 +285,84 @@ def _find_policy(grid: list[list[Any]], kind_row: int) -> Any:
     return fallback
 
 
+@dataclass
+class RawRule:
+    """决策表里一条规则的原始格值 (相邻同 ID 的续行已合并成分支); 加载器从它构造 Rule, 导出器从它翻译成表达式。"""
+
+    rule_id: str
+    priority: float
+    branches: list[dict[str, Any]] = field(default_factory=list)  # 每个分支: 输入列名 -> 原始格值
+    outputs: dict[str, Any] = field(default_factory=dict)  # 输出列名 -> 原始格值
+    desc: str = ""
+    row: int = 0  # 首行的 Excel 行号
+
+
+def read_decision_rows(grid: list[list[Any]], cols: list[tuple[int, str, str]], body_start: int) -> list[RawRule]:
+    """走决策表正文: 相邻的同 ID 行是同一条规则的多个「或」分支 (优先级 / 输出 / 说明以首行为准, 续行不一致报错),
+    不相邻的重复 ID 报错, 优先级留空取 1000 + 行序。"""
+    id_col = next(i for i, k, _ in cols if k == "规则ID")
+    pri_col = next((i for i, k, _ in cols if k == "优先级"), None)
+    desc_col = next((i for i, k, _ in cols if k == "说明"), None)
+    in_cols = [(i, n) for i, k, n in cols if k == "输入"]
+    out_cols = [(i, n) for i, k, n in cols if k == "输出"]
+    rules: list[RawRule] = []
+    seen: dict[str, int] = {}
+    for offset, row in enumerate(grid[body_start:]):
+        excel_row = body_start + offset + 1
+        rid = _text(_at(row, id_col))
+        if not rid:
+            continue
+        pri_raw = _at(row, pri_col)
+        outs = {name: _at(row, i) for i, name in out_cols}
+        branch = {name: _at(row, i) for i, name in in_cols}
+        if rules and rid == rules[-1].rule_id:
+            rule = rules[-1]
+            where = f"规则 {rid} 的续行 (第 {excel_row} 行)"
+            head = f"首行 (第 {rule.row} 行)"
+            if not _blank(pri_raw) and float(pri_raw) != rule.priority:
+                raise ValueError(f"{where} 优先级与{head}不一致; 续行的优先级留空或与首行相同")
+            for name, v in outs.items():
+                if not _blank(v) and not _same_cell(v, rule.outputs.get(name)):
+                    first = _text(rule.outputs.get(name)) or "-"
+                    raise ValueError(
+                        f"{where} 输出「{name}」= {_text(v)}, 与{head}的 {first} 不一致; "
+                        f"同一规则的续行只写条件, 输出留空或与首行相同"
+                    )
+            rule.branches.append(branch)
+            continue
+        if rid in seen:
+            raise ValueError(
+                f"规则ID「{rid}」在第 {seen[rid]} 行和第 {excel_row} 行重复出现; "
+                f"同一规则的多个条件分支 (或) 必须写在相邻的行"
+            )
+        seen[rid] = excel_row
+        rules.append(
+            RawRule(
+                rule_id=rid,
+                priority=1000.0 + offset if _blank(pri_raw) else float(pri_raw),
+                branches=[branch],
+                outputs=outs,
+                desc=_text(_at(row, desc_col)),
+                row=excel_row,
+            )
+        )
+    return rules
+
+
+def _branch_conditions(branches: list[dict[str, Any]]) -> list[Condition]:
+    """每个分支内各输入格 AND, 分支之间 OR。"""
+    per_branch = [[cell_condition(name, v) for name, v in b.items()] for b in branches]
+    if len(per_branch) == 1:
+        return per_branch[0]
+    return [any_of([all_of(b) for b in per_branch])]
+
+
 def load_excel_rules(path: Path) -> RuleSet:
+    return load_excel_raw(path)[0]
+
+
+def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
+    """加载 Excel 规则工作簿, 同时返回决策表的原始格值 (导出器用)。"""
     # data_only=False: 以 = 开头的格 (= 活跃 / =主表.金额 * 1.1) 在 Excel 里会被当成公式存起来,
     # data_only=True 读到的是公式的缓存结果 (没算过是 None, 算过是 #NAME?), 条件就静默变成「不关心」。
     # 这里按原文读, 规则工作簿里的 = 一律是 rule-sheet 表达式, 不支持写 Excel 公式。
@@ -310,71 +388,19 @@ def load_excel_rules(path: Path) -> RuleSet:
     grid = _rows(wb["决策表"])
     cols, kind_row, body_start = _parse_header(grid, "决策表", "规则ID", RULE_KINDS)
     hit_policy = _check_policy(_find_policy(grid, kind_row))
-    id_col = next(i for i, k, _ in cols if k == "规则ID")
-    pri_col = next((i for i, k, _ in cols if k == "优先级"), None)
-    desc_col = next((i for i, k, _ in cols if k == "说明"), None)
-    in_cols = [(i, n) for i, k, n in cols if k == "输入"]
-    out_cols = [(i, n) for i, k, n in cols if k == "输出"]
-
-    # 相邻的同 ID 行是同一条规则的多个「或」分支: 每行内各输入格 AND, 行间 OR; 优先级 / 输出 / 说明以首行为准
-    rules: list[Rule] = []
-    branches: list[list[list[Condition]]] = []
-    first_row: list[int] = []
-    seen: dict[str, int] = {}
-    cell_texts: list[str] = []  # 输入格 / 输出格原文, 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 本期.z)
-    for offset, row in enumerate(grid[body_start:]):
-        excel_row = body_start + offset + 1
-        rid = _text(_at(row, id_col))
-        if not rid:
-            continue
-        pri_raw = _at(row, pri_col)
-        outs = {name: _at(row, i) for i, name in out_cols}
-        conds = [cell_condition(name, _at(row, i)) for i, name in in_cols]
-        cells = [_at(row, i) for i, _ in in_cols] + list(outs.values())
-        # 区间 [0..本期.上限] 里变量紧跟在 .. 后面, 扫描器的名字边界不认 . 前缀, 先把 .. 隔开
-        cell_texts.extend(v.replace("..", " .. ") for v in cells if isinstance(v, str))
-        if rules and rid == rules[-1].rule_id:
-            rule = rules[-1]
-            where = f"规则 {rid} 的续行 (第 {excel_row} 行)"
-            head = f"首行 (第 {first_row[-1]} 行)"
-            if not _blank(pri_raw) and float(pri_raw) != rule.priority:
-                raise ValueError(f"{where} 优先级与{head}不一致; 续行的优先级留空或与首行相同")
-            for name, v in outs.items():
-                if not _blank(v) and not _same_cell(v, rule.outputs.get(name)):
-                    first = _text(rule.outputs.get(name)) or "-"
-                    raise ValueError(
-                        f"{where} 输出「{name}」= {_text(v)}, 与{head}的 {first} 不一致; "
-                        f"同一规则的续行只写条件, 输出留空或与首行相同"
-                    )
-            branches[-1].append(conds)
-            continue
-        if rid in seen:
-            raise ValueError(
-                f"规则ID「{rid}」在第 {seen[rid]} 行和第 {excel_row} 行重复出现; "
-                f"同一规则的多个条件分支 (或) 必须写在相邻的行"
-            )
-        seen[rid] = excel_row
-        rules.append(
-            Rule(
-                rule_id=rid,
-                priority=1000.0 + offset if _blank(pri_raw) else float(pri_raw),
-                conditions=conds,
-                outputs=outs,
-                desc=_text(_at(row, desc_col)),
-            )
-        )
-        branches.append([conds])
-        first_row.append(excel_row)
-    for rule, brs in zip(rules, branches, strict=True):
-        if len(brs) > 1:
-            rule.conditions = [any_of([all_of(b) for b in brs])]
+    raw = read_decision_rows(grid, cols, body_start)
+    rules = [Rule(r.rule_id, r.priority, _branch_conditions(r.branches), r.outputs, r.desc) for r in raw]
+    # 输入格 / 输出格原文, 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 本期.z);
+    # 区间 [0..本期.上限] 里变量紧跟在 .. 后面, 扫描器的名字边界不认 . 前缀, 先把 .. 隔开
+    cells = [v for r in raw for b in r.branches for v in b.values()] + [v for r in raw for v in r.outputs.values()]
+    cell_texts = [v.replace("..", " .. ") for v in cells if isinstance(v, str)]
 
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
-    input_names = [n for _, n in in_cols]
+    input_names = [n for _, k, n in cols if k == "输入"]
     texts = cell_texts + [e for _, e in derived]
     extra = sorted({n for t in texts for n in find_names(t, names, known)} - set(input_names))
     variables = input_names + extra  # 表头输入列 + 单元格与派生变量表达式里引用的列, 用例没给的都视为空
-    output_names = [n for _, n in out_cols]
+    output_names = [n for _, k, n in cols if k == "输出"]
 
     tests: list[TestCase] = []
     if "测试" in wb.sheetnames:
@@ -398,11 +424,10 @@ def load_excel_rules(path: Path) -> RuleSet:
         if not tests:
             raise ValueError("「测试」sheet 里没有任何用例 (「用例」列为空的行会跳过); 写上用例, 或删掉这张 sheet")
 
-    return _check_join_policy(
-        RuleSet(
-            inputs, settings, derived, hit_policy, rules, output_names, tests, source=path.name, variables=variables
-        )
+    rs = RuleSet(
+        inputs, settings, derived, hit_policy, rules, output_names, tests, source=path.name, variables=variables
     )
+    return _check_join_policy(rs), raw
 
 
 # ---------------------------------------------------------------------------

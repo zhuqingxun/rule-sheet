@@ -29,6 +29,7 @@ from .model import (
     Namespace,
     Rule,
     RuleSet,
+    TestCase,
 )
 from .style import display_width
 
@@ -284,32 +285,38 @@ class TestOutcome:
     error: str = ""
 
 
-def run_tests(rs: RuleSet) -> list[TestOutcome]:
+def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.Series]]:
+    """把一条用例构造成 1 行的命名空间 (含派生变量) 和各输出列的原值; run_tests 与 diff 的交叉验证共用。"""
     exist_vars = {f"{s.name}.{EXIST_VAR}" for s in rs.lookups}
     derived_names = {d for d, _ in rs.derived}
+    index = pd.RangeIndex(1)
+    ns: Namespace = {}
+    for name, val in tc.inputs.items():
+        if name in exist_vars and isinstance(val, str):
+            val = val.strip() in TRUE_WORDS
+        if isinstance(val, str) and val.strip() in ("", NULL_WORD):  # 留空或写 空 = 空值
+            val = None
+        if val is None and name in derived_names:
+            continue  # 派生变量留空 = 没给, 按表达式推导 (Excel 测试 sheet 每列每行都在, 留空不能算「给了空值」)
+        if isinstance(val, (date, datetime)):  # Excel 日期格 / YAML 日期 -> 与真实数据的日期列同型, 才能做大小比较
+            val = pd.Timestamp(val)
+        dtype = object if isinstance(val, str) or val is None else None
+        ns[name] = pd.Series([val], index=index, dtype=dtype)
+    ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.settings.get(BASE_DATE_VAR) or date.today()))
+    for name in rs.variables:  # 用例没提到的变量 = 空值
+        if name not in ns and name not in derived_names:
+            ns[name] = pd.Series([None], index=index, dtype=object)
+    add_derived(rs, ns, index, lenient=True)
+    originals = {
+        col: ns.get(f"{rs.primary.name}.{col}", pd.Series([None], index=index, dtype=object)) for col in rs.outputs
+    }
+    return ns, originals
+
+
+def run_tests(rs: RuleSet) -> list[TestOutcome]:
     outcomes: list[TestOutcome] = []
     for tc in rs.tests:
-        index = pd.RangeIndex(1)
-        ns: Namespace = {}
-        for name, val in tc.inputs.items():
-            if name in exist_vars and isinstance(val, str):
-                val = val.strip() in TRUE_WORDS
-            if isinstance(val, str) and val.strip() in ("", NULL_WORD):  # 留空或写 空 = 空值
-                val = None
-            if val is None and name in derived_names:
-                continue  # 派生变量留空 = 没给, 按表达式推导 (Excel 测试 sheet 每列每行都在, 留空不能算「给了空值」)
-            if isinstance(val, (date, datetime)):  # Excel 日期格 / YAML 日期 -> 与真实数据的日期列同型, 才能做大小比较
-                val = pd.Timestamp(val)
-            dtype = object if isinstance(val, str) or val is None else None
-            ns[name] = pd.Series([val], index=index, dtype=dtype)
-        ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.settings.get(BASE_DATE_VAR) or date.today()))
-        for name in rs.variables:  # 用例没提到的变量 = 空值
-            if name not in ns and name not in derived_names:
-                ns[name] = pd.Series([None], index=index, dtype=object)
-        add_derived(rs, ns, index, lenient=True)
-        originals = {
-            col: ns.get(f"{rs.primary.name}.{col}", pd.Series([None], index=index, dtype=object)) for col in rs.outputs
-        }
+        ns, originals = case_namespace(rs, tc)
         try:
             results, hit_ids = apply_rules(rs, ns, originals)
         except Exception as exc:  # noqa: BLE001

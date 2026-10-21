@@ -173,6 +173,14 @@ def _number(x: Any) -> Any:
     return pd.to_numeric(res) if isinstance(res, pd.Series) else res
 
 
+def _to_date(x: Any) -> Any:
+    """日期(x): 日期字面量 日期("2026-10-01"), 或把文本日期列转成日期列 (认不出的为空)。"""
+    _reject_null("日期", x)
+    if isinstance(x, pd.Series):
+        return pd.to_datetime(x, errors="coerce")
+    return None if is_na(x) else pd.Timestamp(x)
+
+
 def _if(cond: Any, a: Any, b: Any) -> Any:
     """如果(条件, 真值, 假值): 向量化三元。条件走真值归一 (空值算假), 分支可以是标量 / 列 / 空。"""
     t = truth(cond)
@@ -254,6 +262,7 @@ FUNCS: dict[str, Any] = {
     **TEXT_FUNCS,
     "拼接": _concat,
     "数字": _number,
+    "日期": _to_date,
     "如果": _if,
     "是": True,
     "否": False,

@@ -3,6 +3,8 @@
 rule-sheet run    <规则文件> [-i 名称=路径[#sheet]]... [-o 输出路径] [--base-dir DIR] [--ignore-tests] [--dry-run]
 rule-sheet test   <规则文件>
 rule-sheet format <规则.xlsx> [-o 路径]      按版式规范重排 Excel 规则工作簿 (颜色 / 列宽 / 换行 / 冻结)
+rule-sheet export <规则.xlsx> [-o 路径]      Excel 决策表导出成 YAML (无损; 源是 Excel, YAML 是生成物)
+rule-sheet diff   <规则A> <规则B>            两份规则文件语义比对: 结构逐项比 + 用例交叉验证
 rule-sheet <规则文件>            等价于 run
 
 规则文件声明输入 (形参), 命令行用 -i 把文件绑定上去 (实参); 规则文件里写了默认文件的可以不给。
@@ -15,11 +17,12 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .convert import diff_rules, export_workbook
 from .engine import RunResult, TestOutcome, run, run_tests
 from .loaders import load_rules
 from .style import format_workbook
 
-SUBCOMMANDS = {"run", "test", "format"}
+SUBCOMMANDS = {"run", "test", "format", "export", "diff"}
 
 
 def _print_tests(outcomes: list[TestOutcome]) -> None:
@@ -98,6 +101,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_fmt = sub.add_parser("format", help="按版式规范重排 Excel 规则工作簿 (颜色 / 列宽 / 换行 / 冻结), 默认原地改写")
     p_fmt.add_argument("rules", type=Path, help="规则工作簿 (.xlsx)")
     p_fmt.add_argument("-o", "--output", type=Path, help="写到另一个文件, 不动原文件")
+
+    p_exp = sub.add_parser("export", help="Excel 决策表导出成 YAML (无损; 源仍是 Excel, YAML 是生成物不要手改)")
+    p_exp.add_argument("rules", type=Path, help="规则工作簿 (.xlsx)")
+    p_exp.add_argument("-o", "--output", type=Path, help="输出的 YAML 路径, 默认同目录同名 .yaml")
+
+    p_diff = sub.add_parser(
+        "diff", help="两份规则文件 (.xlsx / .yaml 任意组合) 语义比对: 结构逐项比, 条件按用例交叉验证"
+    )
+    p_diff.add_argument("a", type=Path, help="规则文件 A")
+    p_diff.add_argument("b", type=Path, help="规则文件 B")
     return parser
 
 
@@ -112,6 +125,23 @@ def main(argv: list[str] | None = None) -> int:
         if ns.command == "format":
             print(f"已格式化: {format_workbook(ns.rules, ns.output)}")
             return 0
+        if ns.command == "export":
+            target = export_workbook(ns.rules, ns.output)
+            rs = load_rules(target)
+            print(f"已导出: {target} ({len(rs.rules)} 条规则, {len(rs.tests)} 条用例)")
+            return 0
+        if ns.command == "diff":
+            res = diff_rules(ns.a, ns.b)
+            print(f"A = {ns.a}\nB = {ns.b}")
+            for note in res.notes:
+                print(f"提示: {note}")
+            for d in res.differences:
+                print(f"差异: {d}")
+            if res.same:
+                print(f"两份规则文件语义一致 (结构逐项相同, {res.cases} 条用例交叉验证输出与命中规则相同)")
+                return 0
+            print(f"发现 {len(res.differences)} 处差异 ({res.cases} 条用例交叉验证)")
+            return 1
         if ns.command == "test":
             rs = load_rules(ns.rules)
             if not rs.tests:
