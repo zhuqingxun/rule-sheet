@@ -309,15 +309,41 @@ def test_excel_continuation_rows_are_or_branches(tmp_path):
     )
     rs = load_rules(p)
     assert [r.rule_id for r in rs.rules] == ["R1", "R2"] and rs.rules[0].priority == 1
+    assert rs.rules[0].branches == []  # 续行输出与首行相同 → 单纯的「或」, 不是分支
     ns = {"主表.a": pd.Series(["x", "q", "q"], dtype=object), "主表.b": pd.Series([None, "y", "n"], dtype=object)}
     res, hit = apply_rules(rs, ns, {})
     assert res["标记"].tolist() == ["命中", "命中", "兜底"] and hit.tolist() == ["R1", "R1", "R2"]
 
 
+def test_excel_continuation_rows_with_own_outputs_are_branches(tmp_path):
+    """issue #20: 续行写了不同的输出 → 各分支有各自输出的规则 (留空的续行输出继承首行); 规则整体计一次, 审计记 R1。"""
+    from rule_sheet.engine import apply_rules
+
+    rows = [
+        ["R1", 1, "x", "-", "甲"],
+        [None, None, "-", "y", "乙"],
+        [None, None, "-", "z", None],
+        ["R2", 2, "-", "-", "兜底"],
+    ]
+    p = make_workbook(tmp_path / "r.xlsx", [["命中策略", "首次命中"], *HEADER, *rows], merges=("A4:A6",))
+    rs = load_rules(p)
+    r1 = rs.rules[0]
+    assert (
+        r1.outputs == {}
+        and r1.conditions == []
+        and [b.outputs for b in r1.branches] == [{"标记": "甲"}, {"标记": "乙"}, {"标记": "甲"}]
+    )
+    ns = {
+        "主表.a": pd.Series(["x", "q", "q", "n"], dtype=object),
+        "主表.b": pd.Series([None, "y", "z", "w"], dtype=object),
+    }
+    res, hit = apply_rules(rs, ns, {"标记": pd.Series(["o"] * 4, dtype=object)})
+    assert res["标记"].tolist() == ["甲", "乙", "甲", "兜底"] and hit.tolist() == ["R1", "R1", "R1", "R2"]
+
+
 @pytest.mark.parametrize(
     ("rows", "msg"),
     [
-        ([["R1", 1, "x", "-", "命中"], ["R1", None, "-", "y", "别的"]], "输出「标记」= 别的, 与首行"),
         ([["R1", 1, "x", "-", "命中"], ["R1", 9, "-", "y", None]], "优先级与首行"),
         ([["R1", 1, "x", "-", "命中"], ["R2", 2, "-", "-", "兜底"], ["R1", 3, "-", "y", "命中"]], "重复出现.*相邻"),
     ],
@@ -325,6 +351,38 @@ def test_excel_continuation_rows_are_or_branches(tmp_path):
 def test_excel_continuation_row_errors(tmp_path, rows, msg):
     with pytest.raises(ValueError, match=msg):
         load_rules(make_workbook(tmp_path / "r.xlsx", [*HEADER, *rows]))
+
+
+def test_yaml_branches(tmp_path):
+    """分支: 规则级 当 是各分支共有的条件, 规则级 则 是各分支的默认值, 分支的 则 按列覆盖; 输出列顺序含分支的 则。"""
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "输入: {主表: {匹配: 主表}}\n命中策略: 首次命中\n规则:\n"
+        '  - 编号: R1\n    当: [主表.c == "on"]\n    则: {备注: 默认}\n    分支:\n'
+        '      - 当: [主表.a == "x"]\n        则: {标记: 甲}\n'
+        '      - 当: [主表.b == "y"]\n        则: {标记: 乙, 备注: 特别}\n'
+        "      - 则: {标记: 丙}\n",
+        encoding="utf-8",
+    )
+    rs = load_yaml_rules(p)
+    r = rs.rules[0]
+    assert rs.outputs == ["备注", "标记"] and r.outputs == {} and len(r.conditions) == 1
+    assert [b.outputs for b in r.branches] == [
+        {"备注": "默认", "标记": "甲"},
+        {"备注": "特别", "标记": "乙"},
+        {"备注": "默认", "标记": "丙"},
+    ]
+    assert [len(b.conditions) for b in r.branches] == [1, 1, 0]
+    assert rs.variables == ["主表.a", "主表.b", "主表.c"]  # 分支里的条件也扫
+    p.write_text("规则:\n  - 编号: R1\n    分支: {当: [x > 1]}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="规则 R1 的 分支: 要是一个非空列表"):
+        load_yaml_rules(p)
+    p.write_text("规则:\n  - 编号: R1\n    分支:\n      - 条件: [x > 1]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="规则 R1 的第 1 个分支只认 当: / 则: / 名称:"):
+        load_yaml_rules(p)
+    p.write_text("命中策略: 多条拼接\n规则:\n  - 编号: R1\n    分支:\n      - 则: {y: 清空}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="规则 R1 输出「y」= 清空: 命中策略 多条拼接"):
+        load_yaml_rules(p)
 
 
 def test_yaml_duplicate_id_and_test_guards(tmp_path):

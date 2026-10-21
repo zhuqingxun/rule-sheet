@@ -209,7 +209,7 @@ def test_export_cli_both_directions(tmp_path, capsys):
     shutil.copy(TAGS_EXCEL, src)
     assert cli.main(["export", str(src)]) == 0
     out = capsys.readouterr().out
-    assert "已导出" in out and "(6 条规则, 8 条用例)" in out and (tmp_path / "r.yaml").exists()
+    assert "已导出" in out and "(7 条规则, 8 条用例)" in out and (tmp_path / "r.yaml").exists()
     assert cli.main(["diff", str(src), str(tmp_path / "r.yaml")]) == 0
     assert "语义一致" in capsys.readouterr().out
     assert cli.main(["diff", str(src), str(STATUS_YAML)]) == 1
@@ -442,6 +442,67 @@ def test_append_option_survives_both_directions(tmp_path):
     assert diff_rules(src, out).same
     src.write_text(src.read_text(encoding="utf-8").replace(", 独有行: 追加", ""), encoding="utf-8")
     assert any(d.startswith("输入「上期」的选项") for d in diff_rules(src, out).differences)
+
+
+BRANCH_YAML = (
+    "输入: {主表: {匹配: 主表}}\n命中策略: 首次命中\n规则:\n"
+    '  - 编号: R1\n    当: [主表.c == "启用"]\n    则: {备注: 默认}\n    分支:\n'
+    '      - 当: [主表.a == "x"]\n        则: {标记: 甲}\n'
+    '      - 当: [主表.b == "y"]\n        则: {标记: 乙, 备注: 特别}\n'
+    "      - 则: {标记: 丙}\n"
+    "测试:\n"
+    "  - 用例: T1\n    输入: {主表.c: 启用, 主表.a: x}\n    期望: {标记: 甲, 备注: 默认}\n"
+    "  - 用例: T2\n    输入: {主表.c: 启用, 主表.b: y}\n    期望: {标记: 乙, 备注: 特别}\n"
+    "  - 用例: T3\n    输入: {主表.c: 启用}\n    期望: {标记: 丙, 备注: 默认}\n"
+    "  - 用例: T4\n    输入: {主表.a: x}\n    期望: {}\n"
+)  # 用例值别用 on / yes 之类: YAML 会把它们解析成布尔
+
+
+def test_branches_round_trip_both_directions(tmp_path):
+    """分支 (issue #20): YAML 分支: -> 决策表续行各自填输出 (规则级 当 / 则 合进每一行);
+    Excel -> YAML 导出成 分支:; diff 比分支输出。"""
+    src = tmp_path / "b.yaml"
+    src.write_text(BRANCH_YAML, encoding="utf-8")
+    out = export_workbook(src, tmp_path / "b.xlsx")
+    ws = load_workbook(out)["决策表"]
+    names = [ws.cell(3, c).value for c in range(1, ws.max_column + 1)]
+    rows = [[ws.cell(r, c).value for c in range(1, ws.max_column + 1)] for r in (4, 5, 6)]
+    col = {n: i for i, n in enumerate(names)}
+    assert [r[col["规则ID"]] for r in rows] == ["R1", None, None] and {str(m) for m in ws.merged_cells.ranges} == {
+        "A4:A6",
+        "B4:B6",
+    }
+    assert [r[col["主表.c"]] for r in rows] == ["启用", "启用", "启用"]  # 规则级条件复制到每一行
+    assert [r[col["主表.a"]] for r in rows] == ["x", None, None] and [r[col["主表.b"]] for r in rows] == [
+        None,
+        "y",
+        None,
+    ]
+    assert [(r[col["标记"]], r[col["备注"]]) for r in rows] == [("甲", "默认"), ("乙", "特别"), ("丙", "默认")]
+    rs = load_rules(out)
+    assert [b.outputs for b in rs.rules[0].branches] == [
+        {"备注": "默认", "标记": "甲"},
+        {"备注": "特别", "标记": "乙"},
+        {"备注": "默认", "标记": "丙"},
+    ]
+    assert [o.passed for o in run_tests(rs)] == [True] * 4
+    assert diff_rules(src, out).same, diff_rules(src, out).differences
+    text = excel_to_yaml(out)
+    assert "分支:" in text and "标记: 乙" in text and "任一满足" not in text
+    again = export_workbook(out, tmp_path / "again.yaml")
+    assert diff_rules(again, src).same
+    changed = tmp_path / "c.yaml"
+    changed.write_text(BRANCH_YAML.replace("则: {标记: 丙}", "则: {标记: 丁}"), encoding="utf-8")
+    res = diff_rules(src, changed)
+    assert any(d.startswith("规则 R1 分支输出") for d in res.differences) and any(
+        "用例「T3」" in d for d in res.differences
+    )
+    nested = tmp_path / "n.yaml"
+    nested.write_text(
+        BRANCH_YAML.replace('当: [主表.a == "x"]', '当: [{任一满足: [主表.a == "x", 主表.b == "z"]}]'), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="规则 R1 分支 1: 分支里不能再有 任一满足"):
+        export_workbook(nested, tmp_path / "n.xlsx")
 
 
 def test_yaml_outside_subset_reports_rule(tmp_path):

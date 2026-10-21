@@ -24,7 +24,7 @@ uv 项目, src 布局, `rule-sheet` 命令, pytest 套件。2026-10-19 从 `D:/C
 | `src/rule_sheet/cli.py` | `rule-sheet run|test|format|export|diff` |
 | `examples/customer-sync/` | 自带样例: 两份数据 + 决策表 + YAML + Gherkin + 生成脚本 (逐列合并的 `优先级` 策略) |
 | `examples/status-machine/` | 第二个样例: 字段名含 `-` / 输出格 `清空` / 命中策略 `首次命中` (2026-10-19 为 issue #1-#4 加); 0.3 (issue #5-#8) 扩成: 决策表同 ID 续行表达跨变量 OR、变量定义里 `且` / `或`、测试 sheet 表头从第 1 行开始 |
-| `examples/position-tags/` | 第三个样例 (0.6, issue #9-#16): 多标签分类, 命中策略 `多条拼接`、单元格文本关键字 `包含` / `不包含` / `开头是`、清单文件当参照表 (`关键岗位清单.存在`)、`数字()` / `N天` / `如果()` / `拼接()` |
+| `examples/position-tags/` | 第三个样例 (0.6, issue #9-#16): 多标签分类, 命中策略 `多条拼接`、单元格文本关键字 `包含` / `不包含` / `开头是`、清单文件当参照表 (`关键岗位清单.存在`)、`数字()` / `N天` / `如果()` / `拼接()`; 0.7 (issue #20) 加了 G6: 续行各自填输出的分支, 多条拼接 下成立的几支接起来 |
 | `examples/carry-forward/` | 第四个样例 (0.7, issue #21): 跨批次带入, 「字段组」sheet / YAML `字段组:` 给六列起名 `会议记录`, 决策表里以组名为列名的输出格写 `上期` 整组复制、显式列优先; 没有「变量定义」sheet |
 | `examples/candidate-rollup/` | 第五个样例 (0.7, issue #17): 候选人汇总, 「输入」里 `重复键: 拼接` + 排序 / 空值占位 / 带序号, 带输入前缀的派生变量 `推荐.现岗` / `冻结.期间`; 没有「设置」sheet |
 | `examples/period-diff/` | 第六个样例 (0.7, issue #18 + #19): 两期比对, 字段组 `对比字段` + 派生变量 `差异(本期, 上期, 对比字段)` + 上期 `独有行: 追加`, 首次命中 四条规则 ADDED / CHANGED / UNCHANGED / REMOVED |
@@ -51,7 +51,7 @@ uv run rule-sheet export examples/customer-sync/规则_决策表.xlsx -o /tmp/r.
 uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/customer-sync/rules.yaml   # 语义比对, 一致返回 0
 ```
 
-验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 7 行变更 / 10 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败; position-tags 8 行变更 / 8 条内嵌用例, 每行的 命中规则 / 标签 / 显示名 都有预期值; carry-forward 5 行变更 / 6 条内嵌用例, 两前端加载后 `Rule.outputs` 展开结果逐条相同; candidate-rollup 4 行变更 / 4 条内嵌用例, 每行的聚合文本都有预期值; period-diff 6 行变更 (含 1 行追加) / 6 条内嵌用例, 每行的差异类型与明细都有预期值)。改解释器语义后必须跑全量, 不要只跑一个前端。
+验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 7 行变更 / 10 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败; position-tags 8 行变更 / 8 条内嵌用例, 每行的 命中规则 / 标签 / 显示名 / 职能 都有预期值; carry-forward 5 行变更 / 6 条内嵌用例, 两前端加载后 `Rule.outputs` 展开结果逐条相同; candidate-rollup 4 行变更 / 4 条内嵌用例, 每行的聚合文本都有预期值; period-diff 6 行变更 (含 1 行追加) / 6 条内嵌用例, 每行的差异类型与明细都有预期值)。改解释器语义后必须跑全量, 不要只跑一个前端。
 
 ## 执行管线 (跨文件, 改引擎前先读)
 
@@ -60,7 +60,8 @@ uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/c
 - **一切向量化**: `Namespace` 是 `{变量名: pd.Series}` (整列); `Condition = Callable[[Namespace], Any]` 可返回含 NaN 的 Series 或标量, 由 `conditions.to_mask` 统一归一成布尔 mask (NaN 视为不命中); `apply_rules` 用 `Series.mask` 按优先级倒序覆盖写入。不要在规则层写逐行循环
 - **内嵌测试复用引擎**: `run_tests` 把每条用例构造成 1 行的 `Namespace`, 走同一套 `add_derived(lenient=True)` + `apply_rules`。改 `apply_rules` 语义会同时影响真实数据与用例
 - **两前端的分叉点** (改一边必须查另一边):
-  - 条件: Excel 每个输入格一个 `cell_condition` (走 `unary_test`), 相邻同 ID 行合成 `any_of([all_of(行)...])`; YAML 整棵 `当:` 树一个 `build_condition` (走 `eval_expr`)。决策表正文先由 `loaders.read_decision_rows` 读成 `RawRule` (原始格值), 加载器与导出器共用; **新增单元格形态要同步 `convert.CellTranslator.cell` 和 `tests/test_convert.py` 的逐形态对照表** (翻出来的表达式必须在含空值的数据上与 `unary_test` 的 mask 一致)
+  - 条件: Excel 每个输入格一个 `cell_condition` (走 `unary_test`), 相邻同 ID 行合成 `any_of([all_of(行)...])`; YAML 整棵 `当:` 树一个 `build_condition` (走 `eval_expr`)。决策表正文先由 `loaders.read_decision_rows` 读成 `RawRule` (原始格值, 含每行的输出原文 `row_outputs`), 加载器与导出器共用; **新增单元格形态要同步 `convert.CellTranslator.cell` 和 `tests/test_convert.py` 的逐形态对照表** (翻出来的表达式必须在含空值的数据上与 `unary_test` 的 mask 一致)
+  - **分支** (0.7, `model.Branch` / `Rule.branches`): 续行输出与首行都相同 → 0.6 的「或」规则 (`RawRule.has_distinct_outputs()` 为假); 有续行写了不同输出 → `Rule(conditions=[], outputs={}, branches=[Branch(行内格条件, 该行生效输出)])`, 留空的续行输出继承首行; YAML `分支: [{当, 则}]`, 规则级 `当` 进 `Rule.conditions`、规则级 `则` 作默认合进每支 (`_yaml_branches`)。引擎 `apply_rules` 的 `rule_value(rule, col) -> (值, 写入 mask)`: 拼接策略下逐行收集成立分支的文本去重接起来, 其它策略下分支 mask 按书写顺序互斥取第一个; 规则 mask = 任一分支成立, 审计记规则 ID。导出: 有各自输出的续行 → `分支:`, 否则仍 `任一满足:`; YAML → Excel 把规则级 当 / 则 合进每一行, 分支里嵌套 任一满足 报错; diff 逐支比输出
   - 两种写法的同步: Excel 是源, `rule-sheet export` 生成 YAML (生成物, 文件头标「请勿手改」), `rule-sheet diff` 对账; YAML -> Excel 只对表格子集, 新增表达式函数或单元格形态时 `ExprToCell` 与 `CellTranslator` 两个方向都要加 (测试里两个方向各有一张逐形态对照表, 都要求翻过去的结果在含空值的数据上 mask 一致); 三个样例的手写 `rules.yaml` 不由导出覆盖, 由 `test_convert.py` 用 diff 守住与 Excel 一致, 并要求它们都在表格子集内 (YAML -> Excel 往返一致)。设计见 `docs/设计架构.md` 5.15
   - `rs.variables` (用例未给即视为空的变量清单): Excel 取表头输入列 + `find_names` 扫描输入格 / 输出格 / 派生变量表达式得到的列 (`..` 区间语法前先补空格, 扫描器的边界不认 `.` 前缀); YAML 靠 `expressions.find_names` 扫描 `当` / `则` / `变量` 的文本 (名字可含 `-` `/` 全角括号, `-`/`/` 后紧跟 `别名.`/数字/已知名字才算运算符; 反引号包裹的整体算一个名字; 引号字符串不扫)。YAML 里新增写变量名的位置要同步进这段扫描。扫描器宁可少认不可多认: 多认会把 `本期.金额-上期.金额` 整体当成空变量, 测试静默算错
   - `rs.outputs` 顺序: Excel 按表头输出列; YAML 按 `则:` 首次出现; 字段组名在原位置换成它的列 (`expand_output_names`), 重复的只留第一次
@@ -81,7 +82,7 @@ uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/c
 - **空值语义**: 空值参与任何比较都不成立 (SQL 风格), 单元格和表达式一样 (0.3 起表达式经 AST 改写; 0.2 的表达式 `!=` 对空值为真); 单元格 `not(...)` 只对有值的格成立, 仅 `not(空)` / `not(为空)` / `not(非空)` 是纯否定; 表达式的 `非` 和 YAML 的 `不满足:` 是纯取反 (空值行也为真), 这是保留的不对称, 见 `docs/设计架构.md` 5.3
 - **关键字 `空`** (`model.NULL_WORD` / 哨兵 `model.NULL`, 0.4 起): 判空的主推写法是 `x == 空` / `x != 空` (单元格 `= 空` / `!= 空` / 单独 `空`), `为空(x)` / `非空(x)` 是同义。它不是值: `_cmp` 与 `unary_test` 的比较分支特判哨兵, 其它运算符 / 算术 / 函数参数报错; `属于` 与 `in` 的枚举里认它; 输出格 `空` / `=空` 等价 `清空`; 测试期望格与输入格写 `空` = 空值; 派生变量算出 `NULL` 置成空列。不加 `null` 别名 (导出数据里常有文本 "null")
 - **布尔词**: `是` / `否` 只在被比较的列本身是布尔列时转成 True/False, 文本列里的「是」是普通文本
-- **条件组合**: YAML 列表默认 `全部满足`, `任一满足` / `不满足` 可嵌套; 表达式内 `且` / `或` / `非` (也认 and / or / not, 两侧留空格); 决策表跨变量 OR 用相邻同 ID 行 (每行内 AND, 行间 OR)
+- **条件组合**: YAML 列表默认 `全部满足`, `任一满足` / `不满足` 可嵌套; 表达式内 `且` / `或` / `非` (也认 and / or / not, 两侧留空格); 决策表跨变量 OR 用相邻同 ID 行 (每行内 AND, 行间 OR); 续行各自填了输出就是有序分支 (合并方式跟随命中策略: 多条拼接 接起来去重, 其它取第一个成立的; 规则整体计一次)
 - **命中策略**: `优先级` 按输出列逐列合并 (数字小者胜, 未写该列的规则不参与); `唯一` 多命中即报错并指出匹配键值; `首次命中` 每行只算优先级数字最小的一条 (同优先级按书写顺序), 实现是在逐列合并前把 masks 按优先级做成互斥, 没有输出的规则也能拦住一行; `多条拼接` (DMN Collect, 0.6) 每个输出列把所有命中规则的值按优先级顺序用「设置」里的 `拼接分隔符` (默认 `/`) 接起来替换原值 (`engine._join_hits`; 空值不贡献, 没命中不动), 加载时 `loaders._check_join_policy` 拦「输出格写 清空」和「设了分隔符却不是这个策略」。设计取舍见 `docs/设计架构.md` 5.2 与 5.13
 - **输出格**: `-` 不改 / `清空` (或 `空` / `=空`) 写空值 (`resolve_output` 返回 `model.CLEAR` 哨兵, 与 `-` 的 None 必须区分) / 字面值 / 变量名复制 / `=表达式`。单元格右侧与输出格里长得像 `<别名>.<列>` 却不在 ns 里的名字报 KeyError (`expressions.dangling_name`), 不当文字; 加引号才是文字
 - **审计列**: 输出文件追加 `命中规则` (`首次命中` 下只记赢的那条)、`变更明细` (清空显示 `旧值 -> 空`)

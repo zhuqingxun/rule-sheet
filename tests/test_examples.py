@@ -189,15 +189,15 @@ def test_status_needs_first_match_not_priority():
 # 第三个样例 position-tags: 多条拼接 / 文本关键字 / 清单当参照表 / 数字() / N天 / 如果() / 拼接()
 # ---------------------------------------------------------------------------
 
-TAGS_EXPECTED = {  # 岗位编码 -> (命中规则, 标签, 显示名)
-    "J001": ("G1; G5; G9", "高管/新推荐", "1-集团总部/集团CEO"),
-    "J002": ("G9", "普通", "3-华东代表处/华东代表处-行政助理"),  # 名称含 助理, G2 不命中; 标签保持原值
-    "J003": ("G2; G3; G4; G9", "直管/关键岗位/高职级", "3-华东代表处/华东代表处-代表"),  # 原值 待定 被整体替换
-    "J004": ("G1; G2; G4; G5; G9", "高管/直管/高职级/新推荐", "2-终端BG/终端BG-产品总裁"),  # 职级格是数字 24
-    "J005": ("G5; G9", "新推荐", "法务经理"),  # 一层组织为空: 如果() 的假分支
-    "J006": ("G3; G4; G9", "关键岗位/高职级", "4-研发体系/研发-SPDT主管"),  # P23 -> 23; 推荐超过一年
-    "J007": ("G5; G9", "新推荐", "5-职能平台/财务部-会计"),  # 职级为空, 数字() 取不到
-    "J008": ("G5; G9", "新推荐", "6-供应链/供应链-采购经理"),  # 正好 365 天
+TAGS_EXPECTED = {  # 岗位编码 -> (命中规则, 标签, 显示名, 职能)
+    "J001": ("G1; G5; G9", "高管/新推荐", "1-集团总部/集团CEO", None),
+    "J002": ("G9", "普通", "3-华东代表处/华东代表处-行政助理", None),  # 名称含 助理, G2 不命中; 标签保持原值
+    "J003": ("G2; G3; G4; G9", "直管/关键岗位/高职级", "3-华东代表处/华东代表处-代表", None),  # 原值 待定 被整体替换
+    "J004": ("G1; G2; G4; G5; G9", "高管/直管/高职级/新推荐", "2-终端BG/终端BG-产品总裁", None),  # 职级格是数字 24
+    "J005": ("G5; G6; G9", "新推荐", "法务经理", "法务"),  # 一层组织为空: 如果() 的假分支; G6 只有 法务 一支
+    "J006": ("G3; G4; G9", "关键岗位/高职级", "4-研发体系/研发-SPDT主管", None),  # P23 -> 23; 推荐超过一年
+    "J007": ("G5; G6; G9", "新推荐", "5-职能平台/财务部-会计", "职能平台/财务"),  # G6 两支成立, 多条拼接 下接起来
+    "J008": ("G5; G6; G9", "新推荐", "6-供应链/供应链-采购经理", "供应链"),  # 正好 365 天
 }
 
 
@@ -205,7 +205,12 @@ TAGS_EXPECTED = {  # 岗位编码 -> (命中规则, 标签, 显示名)
 def test_tags_embedded_cases_all_pass(rules_file):
     rs = load_rules(rules_file)
     assert rs.hit_policy == "多条拼接" and rs.settings["拼接分隔符"] == "/"
-    assert [r.rule_id for r in rs.rules] == ["G1", "G2", "G3", "G4", "G5", "G9"]
+    assert [r.rule_id for r in rs.rules] == ["G1", "G2", "G3", "G4", "G5", "G6", "G9"]
+    g6 = rs.rules[5]
+    assert g6.outputs == {} and [b.outputs for b in g6.branches] == [
+        {"职能": v} for v in ("职能平台", "财务", "法务", "供应链")
+    ]
+    assert rs.outputs == ["标签", "职能", "显示名"]
     assert {"岗位.职级", "岗位.推荐时间", "关键岗位清单.存在"} <= set(rs.variables)  # 派生变量引用的列 + 清单的 存在
     outcomes = run_tests(rs)
     assert len(outcomes) == 8
@@ -217,18 +222,19 @@ def test_tags_real_data_collects_all_hits(rules_file, tmp_path):
     res = run(rules_file, output=tmp_path / "out.xlsx")
     assert not res.stopped_by_tests and res.out is not None
     row = res.out.set_index("岗位编码")
-    for code, (hits, tag, display) in TAGS_EXPECTED.items():
-        assert (row.loc[code, "命中规则"], row.loc[code, "标签"], row.loc[code, "显示名"]) == (hits, tag, display), code
+    for code, (hits, tag, display, func) in TAGS_EXPECTED.items():
+        got = (row.loc[code, "命中规则"], row.loc[code, "标签"], row.loc[code, "显示名"], row.loc[code, "职能"])
+        assert got == (hits, tag, display, func), code
     assert len(res.changed) == 8  # G9 无条件写 显示名, 每一行都变
     assert row.loc["J002", "变更明细"] == "显示名: 空 -> 3-华东代表处/华东代表处-行政助理"
     back = pd.read_excel(res.written).set_index("岗位编码")
-    assert back.loc["J004", "标签"] == "高管/直管/高职级/新推荐"
+    assert back.loc["J004", "标签"] == "高管/直管/高职级/新推荐" and back.loc["J007", "职能"] == "职能平台/财务"
 
 
 def test_tags_frontends_agree(tmp_path):
     a = run(TAGS_EXCEL, output=tmp_path / "a.xlsx").out
     b = run(TAGS_YAML, output=tmp_path / "b.xlsx").out
-    cols = ["岗位编码", "标签", "显示名", "命中规则", "变更明细"]
+    cols = ["岗位编码", "标签", "职能", "显示名", "命中规则", "变更明细"]
     pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
 
 

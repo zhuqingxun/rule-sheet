@@ -75,12 +75,25 @@ REF_TYPES = (InputRef, FieldGroupRef)
 
 
 @dataclass
+class Branch:
+    """规则内的一个有序分支 (0.7, issue #20): 各自的条件与输出 (已与规则级 则 合并, 分支覆盖)。
+
+    分支的合并方式跟随命中策略: 多条拼接 下同一规则内所有成立分支的值按书写顺序接起来 (相同值只记一次),
+    其它策略下取书写顺序第一个成立的分支; 规则整体参与命中策略 (计一次), 审计列记规则 ID。
+    """
+
+    conditions: list[Condition]
+    outputs: dict[str, Any]
+
+
+@dataclass
 class Rule:
     rule_id: str
     priority: float
-    conditions: list[Condition]
-    outputs: dict[str, Any]  # 输出列 -> 原始单元格值 / YAML 值
+    conditions: list[Condition]  # 规则级条件 (有分支时是各分支共有的条件)
+    outputs: dict[str, Any]  # 输出列 -> 原始单元格值 / YAML 值 (有分支时为空, 输出都在分支里)
     desc: str = ""
+    branches: list[Branch] = field(default_factory=list)  # 空 = 没有分支 (0.6 的规则)
 
 
 @dataclass

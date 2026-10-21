@@ -85,7 +85,8 @@ def test_long_cells_wrap_and_rows_grow():
     note_col = next(c for c in range(1, ws.max_column + 1) if ws.cell(body - 2, c).value == "说明")
     display_col = next(c for c in range(1, ws.max_column + 1) if ws.cell(body - 1, c).value == "显示名")
     assert ws.cell(body, note_col).alignment.wrap_text and ws.row_dimensions[body].height > 15
-    assert ws.cell(body + 5, display_col).alignment.wrap_text  # G9 的 =如果(...) 超过输出列上限, 换行而不是继续加宽
+    g9 = next(r for r in range(body, ws.max_row + 1) if str(ws.cell(r, display_col).value).startswith("="))
+    assert ws.cell(g9, display_col).alignment.wrap_text  # G9 的 =如果(...) 超过输出列上限, 换行而不是继续加宽
     assert width(ws, display_col) == WIDTH_BOUNDS["输出"][1]
 
 

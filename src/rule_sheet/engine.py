@@ -26,6 +26,7 @@ from .model import (
     NULL,
     NULL_WORD,
     TRUE_WORDS,
+    Condition,
     FieldGroupRef,
     InputRef,
     InputSpec,
@@ -276,36 +277,54 @@ def add_derived(rs: RuleSet, ns: Namespace, index: pd.Index, *, lenient: bool) -
 # ---------------------------------------------------------------------------
 
 
-def rule_mask(rule: Rule, ns: Namespace, index: pd.Index) -> Mask:
+def _conditions_mask(conds: list[Condition], rule_id: str, ns: Namespace, index: pd.Index) -> Mask:
     m = pd.Series(True, index=index)
-    for cond in rule.conditions:
+    for cond in conds:
         try:
             res = cond(ns)
         except KeyError as exc:
-            raise KeyError(f"规则 {rule.rule_id}: {exc.args[0]}") from exc
+            raise KeyError(f"规则 {rule_id}: {exc.args[0]}") from exc
         m = m & to_mask(res, ns)
     return m
 
 
-def _join_hits(
-    rs: RuleSet,
-    col: str,
-    ordered: list[Rule],
-    masks: dict[str, Mask],
-    cur: pd.Series,
-    output_of: Any,
-) -> pd.Series:
+def branch_masks(rule: Rule, ns: Namespace, index: pd.Index) -> list[Mask]:
+    """每个分支的 mask (规则级条件 AND 分支条件); 没有分支时为空列表。"""
+    common = _conditions_mask(rule.conditions, rule.rule_id, ns, index)
+    return [common & _conditions_mask(b.conditions, rule.rule_id, ns, index) for b in rule.branches]
+
+
+def rule_mask(rule: Rule, ns: Namespace, index: pd.Index) -> Mask:
+    """规则整体的 mask: 规则级条件, 有分支时再 AND 任一分支成立。"""
+    common = _conditions_mask(rule.conditions, rule.rule_id, ns, index)
+    if not rule.branches:
+        return common
+    any_branch = pd.Series(False, index=index)
+    for b in branch_masks(rule, ns, index):
+        any_branch = any_branch | b
+    return common & any_branch
+
+
+def _as_column(v: Any, index: pd.Index) -> pd.Series:
+    if isinstance(v, pd.Series):
+        return v.astype(object)
+    return pd.Series([v] * len(index), index=index, dtype=object)
+
+
+def _texts(s: pd.Series) -> pd.Series:
+    return pd.Series([None if is_na(v) else text_of(v) for v in s.tolist()], index=s.index, dtype=object)
+
+
+def _join_hits(rs: RuleSet, col: str, ordered: list[Rule], rule_value: Any, cur: pd.Series) -> pd.Series:
     """多条拼接: 按优先级顺序把每条命中规则对该列写的值接到后面; 清空 / 算出空值的规则不贡献。"""
     sep = str(rs.settings.get(JOIN_SEP_KEY, DEFAULT_JOIN_SEP))
     acc = pd.Series([None] * len(cur), index=cur.index, dtype=object)
     for rule in ordered:
-        val = output_of(rule, col)
-        if val is None or val is CLEAR:
+        val, write = rule_value(rule, col)
+        if val is None:
             continue
-        if not isinstance(val, pd.Series):
-            val = pd.Series([val] * len(cur), index=cur.index, dtype=object)
-        texts = pd.Series([None if is_na(v) else text_of(v) for v in val.tolist()], index=cur.index, dtype=object)
-        add = masks[rule.rule_id] & texts.notna()
+        texts = _texts(val)
+        add = write & texts.notna()
         prefix = acc.map(lambda s: "" if s is None else s + sep)
         acc = acc.mask(add, prefix + texts.fillna(""))
     return cur.mask(acc.notna(), acc)
@@ -325,12 +344,23 @@ def apply_rules(
         之后走与 优先级 相同的逐列合并, 此时每行至多一条规则, 结果就是该规则的输出 (- 的列保持原值)。
     命中策略 多条拼接: 每个输出列把所有命中规则写的值按优先级顺序 (同优先级按书写顺序) 用分隔符拼成一个文本,
         替换原值; 没写该列的规则不参与, 没有任何命中的行不动。
+    规则内的分支 (Rule.branches): 规则整体参与上面的策略 (计一次, 审计记规则 ID); 规则对一行写什么由分支决定:
+        多条拼接 下所有成立分支的值按书写顺序接起来 (相同值只记一次), 其它策略下取书写顺序第一个成立的分支。
     """
     index = ns_index(ns)
     dup = sorted({r.rule_id for r in rs.rules if sum(x.rule_id == r.rule_id for x in rs.rules) > 1})
     if dup:  # 两个加载器都已拦截, 这里兜底: masks 按 ID 建字典, 重复 ID 会静默丢掉一条规则
         raise ValueError(f"规则 ID 重复: {', '.join(dup)}")
-    masks = {r.rule_id: rule_mask(r, ns, index) for r in rs.rules}
+    per_branch = {r.rule_id: branch_masks(r, ns, index) for r in rs.rules}
+    masks: dict[str, Mask] = {}
+    for r in rs.rules:
+        if r.branches:
+            any_branch = pd.Series(False, index=index)
+            for b in per_branch[r.rule_id]:
+                any_branch = any_branch | b
+            masks[r.rule_id] = any_branch
+        else:
+            masks[r.rule_id] = _conditions_mask(r.conditions, r.rule_id, ns, index)
     ordered = sorted(rs.rules, key=lambda r: r.priority)  # 稳定排序: 同优先级保持书写顺序
 
     if rs.hit_policy == "唯一":
@@ -351,11 +381,52 @@ def apply_rules(
             taken = taken | effective
             masks[rule.rule_id] = effective
 
-    def output_of(rule: Rule, col: str) -> Any:
+    sep = str(rs.settings.get(JOIN_SEP_KEY, DEFAULT_JOIN_SEP))
+    nothing = pd.Series(False, index=index)
+
+    def output_of(rule: Rule, outputs: dict[str, Any], col: str) -> Any:
         try:
-            return resolve_output(rule.outputs.get(col), ns)
+            return resolve_output(outputs.get(col), ns)
         except KeyError as exc:
             raise KeyError(f"规则 {rule.rule_id} 输出「{col}」: {exc.args[0]}") from exc
+
+    def rule_value(rule: Rule, col: str) -> tuple[pd.Series | None, Mask]:
+        """规则对该列每行写的值 (object 列, 清空 已换成 None) 与写入 mask; 不写该列返回 (None, 全 False)。"""
+        if not rule.branches:
+            val = output_of(rule, rule.outputs, col)
+            if val is None:
+                return None, nothing
+            return _as_column(None if val is CLEAR else val, index), masks[rule.rule_id]
+        effective = [b & masks[rule.rule_id] for b in per_branch[rule.rule_id]]  # 首次命中 收窄过的规则 mask
+        values = [output_of(rule, b.outputs, col) for b in rule.branches]
+        if all(v is None for v in values):
+            return None, nothing
+        columns = [None if v is None else _as_column(None if v is CLEAR else v, index) for v in values]
+        if rs.hit_policy == JOIN_POLICY:  # 所有成立分支的值按书写顺序接起来, 相同值只记一次
+            texts = [None if c is None else _texts(c) for c in columns]
+            rows: list[str | None] = []
+            for i in range(len(index)):
+                items: list[str] = []
+                for m, t in zip(effective, texts, strict=True):
+                    if t is None or not m.iloc[i]:
+                        continue
+                    v = t.iloc[i]
+                    if v is not None and v not in items:
+                        items.append(v)
+                rows.append(sep.join(items) if items else None)
+            joined = pd.Series(rows, index=index, dtype=object)
+            return joined, joined.notna()
+        val = pd.Series([None] * len(index), index=index, dtype=object)
+        write = nothing.copy()
+        seen = nothing.copy()
+        for m, c in zip(effective, columns, strict=True):  # 书写顺序第一个成立的分支决定输出
+            own = m & ~seen
+            seen = seen | m
+            if c is None:
+                continue
+            val = val.mask(own, c)
+            write = write | own
+        return val, write
 
     results: dict[str, pd.Series] = {}
     for col in rs.outputs:
@@ -364,17 +435,13 @@ def apply_rules(
             cur = pd.Series([None] * len(index), index=index, dtype=object)
         cur = cur.astype(object)
         if rs.hit_policy == JOIN_POLICY:
-            results[col] = _join_hits(rs, col, ordered, masks, cur, output_of)
+            results[col] = _join_hits(rs, col, ordered, rule_value, cur)
             continue
         for rule in reversed(ordered):  # 优先级数字大的先写, 小的最后写并覆盖
-            val = output_of(rule, col)
+            val, write = rule_value(rule, col)
             if val is None:
                 continue
-            if val is CLEAR:
-                val = None
-            elif isinstance(val, pd.Series):
-                val = val.astype(object)
-            cur = cur.mask(masks[rule.rule_id], val)
+            cur = cur.mask(write, val)
         results[col] = cur
 
     hit_ids = pd.Series(

@@ -238,6 +238,10 @@ def _input_opts(spec: Any) -> dict[str, Any]:
     return out
 
 
+def _then(outputs: dict[str, Any]) -> dict[str, Any]:
+    return {col: _plain(v) for col, v in outputs.items() if v is not None and str(v).strip() not in BLANK_WORDS}
+
+
 def _rule_doc(tr: CellTranslator, r: RawRule) -> dict[str, Any]:
     doc: dict[str, Any] = {"编号": r.rule_id}
     if r.desc:
@@ -247,12 +251,23 @@ def _rule_doc(tr: CellTranslator, r: RawRule) -> dict[str, Any]:
     for b in r.branches:
         exprs = [e for e in (tr.cell(var, cell) for var, cell in b.items()) if e is not None]
         branches.append(exprs)
+    if r.has_distinct_outputs():  # 续行各自有输出 → 分支: (每支自己的 当 / 则)
+        doc["分支"] = []
+        for exprs, outs in zip(branches, r.branch_outputs(), strict=True):
+            item: dict[str, Any] = {}
+            if exprs:
+                item["当"] = exprs
+            then = _then(outs)
+            if then:
+                item["则"] = then
+            doc["分支"].append(item)
+        return doc
     if len(branches) == 1:
         if branches[0]:
             doc["当"] = branches[0]
     else:
         doc["当"] = [{"任一满足": [b[0] if len(b) == 1 else b for b in branches]}]
-    then = {col: _plain(v) for col, v in r.outputs.items() if v is not None and str(v).strip() not in BLANK_WORDS}
+    then = _then(r.outputs)
     if then:
         doc["则"] = then
     return doc
@@ -603,15 +618,32 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
     primary = rs.primary.name
     columns: list[str] = []
     headers: list[str] = []  # 决策表的输出列按 则: 原文 (字段组名保留为一列); 测试 sheet 的期望列是展开后的 rs.outputs
-    parsed: list[tuple[str, Any, list[dict[str, str]], dict[str, Any], str]] = []
+    parsed: list[tuple[str, Any, list[dict[str, str]], list[dict[str, Any] | None], str]] = []
     for order, r in enumerate(doc.get("规则") or []):
         rid = str(r.get("编号", f"R{order + 1}"))
-        branches = conv.branches(r.get("当") or [], f"规则 {rid}")
-        for b in branches:
-            columns.extend(v for v in b if v not in columns)
+        where = f"规则 {rid}"
         then = {str(k): v for k, v in (r.get("则") or {}).items()}
         headers.extend(k for k in then if k not in headers)
-        parsed.append((rid, r.get("优先级", 1000 + order), branches, then, str(r.get("名称", ""))))
+        if r.get("分支"):  # 每个分支一行: 规则级 当 + 分支 当 合成这一行的格, 规则级 则 + 分支 则 合成这一行的输出
+            common = r.get("当") or []
+            common = common if isinstance(common, list) else [common]
+            branches = []
+            thens: list[dict[str, Any] | None] = []
+            for i, b in enumerate(r["分支"], 1):
+                own = b.get("当") or []
+                rows = conv.branches([*common, *(own if isinstance(own, list) else [own])], f"{where} 分支 {i}")
+                if len(rows) != 1:
+                    raise ValueError(f"{where} 分支 {i}: 分支里不能再有 任一满足 (决策表一个分支就是一行)")
+                branches.append(rows[0])
+                b_then = {str(k): v for k, v in (b.get("则") or {}).items()}
+                headers.extend(k for k in b_then if k not in headers)
+                thens.append({**then, **b_then})
+        else:
+            branches = conv.branches(r.get("当") or [], where)
+            thens = [then, *[None] * (len(branches) - 1)]  # 单纯的「或」: 输出只写在首行, 续行留空 = 与首行相同
+        for b in branches:
+            columns.extend(v for v in b if v not in columns)
+        parsed.append((rid, r.get("优先级", 1000 + order), branches, thens, str(r.get("名称", ""))))
 
     wb = Workbook()
     ws = wb.active
@@ -646,14 +678,15 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
     ws.append(["命中策略", rs.hit_policy])
     ws.append(["规则ID", "优先级", *["输入"] * len(columns), *["输出"] * len(headers), "说明"])
     ws.append(["规则ID", "优先级", *columns, *headers, "说明"])
-    for rid, priority, branches, then, desc in parsed:
+    for rid, priority, branches, thens, desc in parsed:
         first = ws.max_row + 1
-        for i, b in enumerate(branches):
+        for i, (b, then) in enumerate(zip(branches, thens, strict=True)):
             cells = [b.get(c) for c in columns]
+            outs = [None if then is None else _excel_value(then.get(o)) for o in headers]
             if i == 0:
-                ws.append([rid, priority, *cells, *[_excel_value(then.get(o)) for o in headers], desc or None])
+                ws.append([rid, priority, *cells, *outs, desc or None])
             else:
-                ws.append([None, None, *cells, *[None] * len(headers), None])
+                ws.append([None, None, *cells, *outs, None])
         if len(branches) > 1:
             ws.merge_cells(start_row=first, start_column=1, end_row=first + len(branches) - 1, end_column=1)
             ws.merge_cells(start_row=first, start_column=2, end_row=first + len(branches) - 1, end_column=2)
@@ -699,6 +732,10 @@ def _norm_cell(v: Any) -> Any:
     if isinstance(v, float) and v.is_integer():
         return int(v)
     return v
+
+
+def _norm_outputs(outputs: dict[str, Any]) -> dict[str, Any]:
+    return {c: _norm_cell(v) for c, v in outputs.items() if _norm_cell(v) is not None}
 
 
 def _norm_given(d: dict[str, Any]) -> dict[str, Any]:
@@ -750,10 +787,14 @@ def _structure_diff(a: RuleSet, b: RuleSet, res: DiffResult) -> None:
             continue
         if ra[rid].priority != rb[rid].priority:
             res.differences.append(f"规则 {rid} 优先级: A {ra[rid].priority:g}, B {rb[rid].priority:g}")
-        oa = {c: _norm_cell(v) for c, v in ra[rid].outputs.items() if _norm_cell(v) is not None}
-        ob = {c: _norm_cell(v) for c, v in rb[rid].outputs.items() if _norm_cell(v) is not None}
+        oa = _norm_outputs(ra[rid].outputs)
+        ob = _norm_outputs(rb[rid].outputs)
         if oa != ob:
             res.differences.append(f"规则 {rid} 输出: A {oa}, B {ob}")
+        ba = [_norm_outputs(b.outputs) for b in ra[rid].branches]
+        bb = [_norm_outputs(b.outputs) for b in rb[rid].branches]
+        if ba != bb:
+            res.differences.append(f"规则 {rid} 分支输出: A {ba}, B {bb}")
     ta = {_case_key(t.name): t for t in a.tests}
     tb = {_case_key(t.name): t for t in b.tests}
     keys = [_case_key(t.name) for t in a.tests] + [k for k in (_case_key(t.name) for t in b.tests) if k not in ta]

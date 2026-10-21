@@ -38,6 +38,7 @@ from .model import (
     PRIMARY_WORD,
     SETTING_KEYS,
     TRUE_WORDS,
+    Branch,
     Condition,
     InputSpec,
     Rule,
@@ -69,12 +70,13 @@ def _check_join_policy(rs: RuleSet) -> RuleSet:
             raise ValueError(f"设置了「{JOIN_SEP_KEY}」, 但命中策略是「{rs.hit_policy}」而不是 {JOIN_POLICY}")
         return rs
     for rule in rs.rules:
-        for col, v in rule.outputs.items():
-            if _text(v).lstrip("=").strip() in CLEAR_WORDS | {NULL_WORD}:
-                raise ValueError(
-                    f"规则 {rule.rule_id} 输出「{col}」= {_text(v)}: "
-                    f"命中策略 {JOIN_POLICY} 只拼接有值的输出, 不能写 清空"
-                )
+        for outputs in (rule.outputs, *[b.outputs for b in rule.branches]):
+            for col, v in outputs.items():
+                if _text(v).lstrip("=").strip() in CLEAR_WORDS | {NULL_WORD}:
+                    raise ValueError(
+                        f"规则 {rule.rule_id} 输出「{col}」= {_text(v)}: "
+                        f"命中策略 {JOIN_POLICY} 只拼接有值的输出, 不能写 清空"
+                    )
     return rs
 
 
@@ -337,6 +339,11 @@ def expand_group_outputs(
     return out
 
 
+def all_output_values(rules: list[Rule]) -> list[Any]:
+    """规则级与各分支的输出格值 (变量扫描用)。"""
+    return [v for r in rules for outs in (r.outputs, *[b.outputs for b in r.branches]) for v in outs.values()]
+
+
 def expand_output_names(headers: list[str], groups: dict[str, list[str]]) -> list[str]:
     """输出列清单: 字段组名换成它的列 (在原位置), 重复的只留第一次出现。"""
     out: list[str] = []
@@ -471,14 +478,28 @@ class RawRule:
     rule_id: str
     priority: float
     branches: list[dict[str, Any]] = field(default_factory=list)  # 每个分支: 输入列名 -> 原始格值
-    outputs: dict[str, Any] = field(default_factory=dict)  # 输出列名 -> 原始格值
+    outputs: dict[str, Any] = field(default_factory=dict)  # 首行的 输出列名 -> 原始格值
     desc: str = ""
     row: int = 0  # 首行的 Excel 行号
+    row_outputs: list[dict[str, Any]] = field(
+        default_factory=list
+    )  # 每一行 (含首行) 的输出格原文; 续行留空 = 与首行相同
+
+    def branch_outputs(self) -> list[dict[str, Any]]:
+        """每个分支生效的输出格: 续行留空的格继承首行。"""
+        return [
+            {col: (self.outputs.get(col) if _blank(v) else v) for col, v in outs.items()} for outs in self.row_outputs
+        ]
+
+    def has_distinct_outputs(self) -> bool:
+        """续行的输出与首行不同 → 这是有各自输出的分支 (0.7, issue #20), 否则是单纯的「或」。"""
+        first = {c: _text(v) for c, v in self.outputs.items()}
+        return any({c: _text(v) for c, v in outs.items()} != first for outs in self.branch_outputs()[1:])
 
 
 def read_decision_rows(grid: list[list[Any]], cols: list[tuple[int, str, str]], body_start: int) -> list[RawRule]:
-    """走决策表正文: 相邻的同 ID 行是同一条规则的多个「或」分支 (优先级 / 输出 / 说明以首行为准, 续行不一致报错),
-    不相邻的重复 ID 报错, 优先级留空取 1000 + 行序。"""
+    """走决策表正文: 相邻的同 ID 行是同一条规则的多个分支 (优先级 / 说明以首行为准, 续行优先级不一致报错;
+    续行的输出留空 = 与首行相同, 写了不同的值 = 各分支有各自的输出), 不相邻的重复 ID 报错, 优先级留空取 1000 + 行序。"""
     id_col = next(i for i, k, _ in cols if k == "规则ID")
     pri_col = next((i for i, k, _ in cols if k == "优先级"), None)
     desc_col = next((i for i, k, _ in cols if k == "说明"), None)
@@ -500,14 +521,8 @@ def read_decision_rows(grid: list[list[Any]], cols: list[tuple[int, str, str]], 
             head = f"首行 (第 {rule.row} 行)"
             if not _blank(pri_raw) and float(pri_raw) != rule.priority:
                 raise ValueError(f"{where} 优先级与{head}不一致; 续行的优先级留空或与首行相同")
-            for name, v in outs.items():
-                if not _blank(v) and not _same_cell(v, rule.outputs.get(name)):
-                    first = _text(rule.outputs.get(name)) or "-"
-                    raise ValueError(
-                        f"{where} 输出「{name}」= {_text(v)}, 与{head}的 {first} 不一致; "
-                        f"同一规则的续行只写条件, 输出留空或与首行相同"
-                    )
             rule.branches.append(branch)
+            rule.row_outputs.append(outs)
             continue
         if rid in seen:
             raise ValueError(
@@ -523,6 +538,7 @@ def read_decision_rows(grid: list[list[Any]], cols: list[tuple[int, str, str]], 
                 outputs=outs,
                 desc=_text(_at(row, desc_col)),
                 row=excel_row,
+                row_outputs=[outs],
             )
         )
     return rules
@@ -534,6 +550,25 @@ def _branch_conditions(branches: list[dict[str, Any]]) -> list[Condition]:
     if len(per_branch) == 1:
         return per_branch[0]
     return [any_of([all_of(b) for b in per_branch])]
+
+
+def _excel_rule(r: RawRule, groups: dict[str, list[str]], names: list[str]) -> Rule:
+    """续行输出都与首行相同 → 一条「或」规则 (0.6); 有续行写了不同的输出 → 各分支有各自输出的规则 (0.7)。"""
+    where = f"规则 {r.rule_id} (第 {r.row} 行)"
+    if not r.has_distinct_outputs():
+        return Rule(
+            r.rule_id,
+            r.priority,
+            _branch_conditions(r.branches),
+            expand_group_outputs(r.outputs, groups, names, where),
+            r.desc,
+        )
+    branches = []
+    for cells, outs in zip(r.branches, r.branch_outputs(), strict=True):
+        expanded = expand_group_outputs(outs, groups, names, where)
+        outputs = {c: v for c, v in expanded.items() if not _blank(v)}  # 分支里 - 就是不写, 与 YAML 的 则: 一致
+        branches.append(Branch([cell_condition(name, v) for name, v in cells.items()], outputs))
+    return Rule(r.rule_id, r.priority, [], {}, r.desc, branches=branches)
 
 
 def load_excel_rules(path: Path) -> RuleSet:
@@ -570,19 +605,10 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
     cols, kind_row, body_start = _parse_header(grid, "决策表", "规则ID", RULE_KINDS)
     hit_policy = _check_policy(_find_policy(grid, kind_row))
     raw = read_decision_rows(grid, cols, body_start)
-    rules = [
-        Rule(
-            r.rule_id,
-            r.priority,
-            _branch_conditions(r.branches),
-            expand_group_outputs(r.outputs, groups, names, f"规则 {r.rule_id} (第 {r.row} 行)"),
-            r.desc,
-        )
-        for r in raw
-    ]
-    # 输入格原文 + 展开后的输出格, 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 本期.z / 字段组展开出的 上期.z);
+    rules = [_excel_rule(r, groups, names) for r in raw]
+    # 输入格原文 + 展开后的输出格 (含分支的), 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 字段组展开出的 上期.z);
     # 区间 [0..本期.上限] 里变量紧跟在 .. 后面, 扫描器的名字边界不认 . 前缀, 先把 .. 隔开
-    cells = [v for r in raw for b in r.branches for v in b.values()] + [v for r in rules for v in r.outputs.values()]
+    cells = [v for r in raw for b in r.branches for v in b.values()] + all_output_values(rules)
     cell_texts = [v.replace("..", " .. ") for v in cells if isinstance(v, str)]
 
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
@@ -661,6 +687,26 @@ def _yaml_inputs(doc: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
     return inputs, settings
 
 
+def _yaml_branches(
+    spec: Any, rid: str, defaults: dict[str, Any], groups: dict[str, list[str]], names: list[str]
+) -> list[Branch]:
+    """规则的 分支: [{当: ..., 则: ...}, ...]; 规则级 则 是各分支的默认值, 分支的 则 按列覆盖。"""
+    if spec is None:
+        return []
+    if not isinstance(spec, list) or not spec:
+        raise ValueError(f"规则 {rid} 的 分支: 要是一个非空列表, 每项写 当: / 则:")
+    branches: list[Branch] = []
+    for i, b in enumerate(spec, 1):
+        if not isinstance(b, dict) or any(k not in ("当", "则", "名称") for k in b):
+            raise ValueError(f"规则 {rid} 的第 {i} 个分支只认 当: / 则: / 名称:")
+        conds = b.get("当") or []
+        then = expand_group_outputs(
+            {str(k): v for k, v in (b.get("则") or {}).items()}, groups, names, f"规则 {rid} 分支 {i}"
+        )
+        branches.append(Branch([build_condition(conds)] if conds else [], {**defaults, **then}))
+    return branches
+
+
 def load_yaml_rules(path: Path) -> RuleSet:
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     inputs, settings = _yaml_inputs(doc)
@@ -671,26 +717,30 @@ def load_yaml_rules(path: Path) -> RuleSet:
     headers: list[str] = []
     for order, r in enumerate(doc.get("规则") or []):
         conds = r.get("当") or []
-        then = r.get("则") or {}  # 则: 省略或为空 = 命中但什么都不改 (首次命中 下用来拦截一行)
+        then = {str(k): v for k, v in (r.get("则") or {}).items()}  # 则: 省略或为空 = 命中但什么都不改
         rid = str(r.get("编号", f"R{order + 1}"))
         if any(x.rule_id == rid for x in rules):
             raise ValueError(f"规则编号「{rid}」重复; 一条规则的多个条件分支请写在它的 当: 里 (任一满足:)")
+        expanded = expand_group_outputs(then, groups, names, f"规则 {rid}")
+        branches = _yaml_branches(r.get("分支"), rid, expanded, groups, names)
         rules.append(
             Rule(
                 rule_id=rid,
                 priority=float(r.get("优先级", 1000 + order)),
                 conditions=[build_condition(conds)] if conds else [],
-                outputs=expand_group_outputs({str(k): v for k, v in then.items()}, groups, names, f"规则 {rid}"),
+                outputs={} if branches else expanded,
                 desc=str(r.get("名称", "")),
+                branches=branches,
             )
         )
-        for col in then:
-            if str(col) not in headers:
-                headers.append(str(col))
+        for col in [*then, *[str(c) for b in (r.get("分支") or []) for c in (b.get("则") or {})]]:
+            if col not in headers:
+                headers.append(col)
     outputs = expand_output_names(headers, groups)
-    # 扫描 当 / 则 (字段组已展开) / 变量 里引用到的 <输入名>.<列> 变量名; YAML 里新增写变量名的位置要同步加进 texts
+    # 扫描 当 / 则 (字段组已展开, 含分支) / 变量 里引用到的 <输入名>.<列>; YAML 里新增写变量名的位置要同步进 texts
     texts = [s for r in doc.get("规则") or [] for s in strings_in(r.get("当"))]
-    texts += [str(v) for r in rules for v in r.outputs.values()]
+    texts += [s for r in doc.get("规则") or [] for b in (r.get("分支") or []) for s in strings_in(b.get("当"))]
+    texts += [str(v) for v in all_output_values(rules)]
     texts += [v for _, v in derived]
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
     found = {n for t in texts for n in find_names(t, names, known)} | {k for k, _ in derived}

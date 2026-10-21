@@ -442,6 +442,75 @@ def test_join_policy_concatenates_all_hits_in_priority_order(ns_two_rows):
     assert res["标签"].tolist() == ["7/高管", "7", "7"] and res["备注"].tolist() == ["139/a", "138", "旧"]
 
 
+def _branch_rule_set(policy, second=None):
+    from rule_sheet.model import Branch
+
+    r4 = Rule(
+        "R4",
+        1,
+        [cell_condition("主表.状态", "非空")],  # 各分支共有的条件
+        {},
+        branches=[
+            Branch([cell_condition("主表.状态", "活跃")], {"类别": "A-活跃"}),
+            Branch([cell_condition("主表.金额", "> 0")], {"类别": "B-有钱", "备注": "有金额"}),
+            Branch([], {"类别": "C-其他"}),  # 无条件 = 规则内的兜底
+        ],
+    )
+    r9 = second or Rule("R9", 2, [], {"备注": "兜底"})
+    settings = {"拼接分隔符": "/"} if policy == "多条拼接" else {}
+    return make_rs([r4, r9], ["类别", "备注"], hit_policy=policy, settings=settings)
+
+
+def _branch_originals():
+    idx = pd.RangeIndex(3)
+    return {
+        "类别": pd.Series([None] * 3, index=idx, dtype=object),
+        "备注": pd.Series(["o1", "o2", "o3"], index=idx, dtype=object),
+    }
+
+
+def test_branches_follow_hit_policy(ns_two_rows):
+    """issue #20: 规则内有序分支。行 0 (活跃, 金额 10000) 三个分支都成立, 行 1 (休眠, 金额 0) 只有兜底分支,
+    行 2 状态为空不命中。首次命中 / 优先级: 取书写顺序第一个成立的分支; 多条拼接: 所有成立分支的值接起来;
+    规则整体计一次, 审计记 R4。"""
+    res, hits = apply_rules(_branch_rule_set("首次命中"), ns_two_rows, _branch_originals())
+    assert res["类别"].tolist() == ["A-活跃", "C-其他", None] and res["备注"].tolist() == ["o1", "o2", "兜底"]
+    assert hits.tolist() == ["R4", "R4", "R9"]
+    res, hits = apply_rules(_branch_rule_set("优先级"), ns_two_rows, _branch_originals())
+    assert res["类别"].tolist() == ["A-活跃", "C-其他", None]  # 第一个成立的分支不写 备注, 这一列由 R9 补
+    assert res["备注"].tolist() == ["兜底", "兜底", "兜底"] and hits.tolist() == ["R4; R9", "R4; R9", "R9"]
+    res, hits = apply_rules(_branch_rule_set("多条拼接"), ns_two_rows, _branch_originals())
+    assert res["类别"].tolist() == ["A-活跃/B-有钱/C-其他", "C-其他", "o3" if False else None]
+    assert res["备注"].tolist() == ["有金额/兜底", "兜底", "兜底"] and hits.tolist() == ["R4; R9", "R4; R9", "R9"]
+    only_null = Rule("R9", 2, [cell_condition("主表.状态", "空")], {"备注": "兜底"})
+    res, hits = apply_rules(
+        _branch_rule_set("唯一", only_null), ns_two_rows, _branch_originals()
+    )  # 多个分支成立不算重叠
+    assert hits.tolist() == ["R4", "R4", "R9"] and res["类别"].tolist() == ["A-活跃", "C-其他", None]
+
+
+def test_branches_with_same_value_join_once(ns_two_rows):
+    from rule_sheet.model import Branch
+
+    r = Rule(
+        "R1",
+        1,
+        [],
+        {},
+        branches=[
+            Branch([cell_condition("主表.状态", "活跃")], {"类别": "X"}),
+            Branch([cell_condition("主表.金额", "> 0")], {"类别": "X"}),
+        ],
+    )
+    rs = make_rs([r], ["类别"], hit_policy="多条拼接")
+    res, hits = apply_rules(rs, ns_two_rows, _branch_originals())
+    assert res["类别"].tolist() == ["X", None, "X"] and hits.tolist() == [
+        "R1",
+        "",
+        "R1",
+    ]  # 行 0 两支都成立, 相同值只记一次
+
+
 def test_unique_policy_reports_label(ns_two_rows):
     r1 = Rule("R1", 1, [cell_condition("本月.存在", "是")], {"x": "1"})
     r2 = Rule("R2", 2, [expr_condition("主表.金额 > 100")], {"x": "2"})
