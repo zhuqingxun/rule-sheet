@@ -16,6 +16,9 @@ from rule_sheet.loaders import load_rules
 from rule_sheet.model import InputSpec, RuleSet
 
 from .conftest import (
+    CAND_DIR,
+    CAND_EXCEL,
+    CAND_YAML,
     CARRY_DIR,
     CARRY_EXCEL,
     CARRY_YAML,
@@ -36,8 +39,9 @@ SAMPLES = pytest.mark.parametrize(
         (STATUS_EXCEL, STATUS_YAML, STATUS_DIR),
         (TAGS_EXCEL, TAGS_YAML, TAGS_DIR),
         (CARRY_EXCEL, CARRY_YAML, CARRY_DIR),
+        (CAND_EXCEL, CAND_YAML, CAND_DIR),
     ],
-    ids=["customer", "status", "tags", "carry"],
+    ids=["customer", "status", "tags", "carry", "cand"],
 )
 
 
@@ -393,6 +397,26 @@ def test_field_groups_survive_both_directions_and_diff(tmp_path):
     res = diff_rules(CARRY_EXCEL, p)
     assert any(d.startswith("字段组不同") for d in res.differences)
     assert any("规则 R1 输出" in d and "上期.岗位名称" in d for d in res.differences)  # 展开后的逐列输出也跟着不同
+
+
+def test_concat_input_options_survive_both_directions(tmp_path):
+    text = excel_to_yaml(CAND_EXCEL)
+    assert "推荐: {文件: 推荐记录.xlsx, 匹配: 岗位编码, 重复键: 拼接, 排序: 推荐时间 降序, 空值占位: NA}" in text
+    assert (
+        "冻结: {文件: 冻结记录.xlsx, 匹配: 工号 = 岗位.现任工号, 重复键: 拼接, 排序: 冻结开始 降序, 带序号: 是}" in text
+    )
+    assert "推荐.现岗: 拼接(推荐.现部门" in text  # 带前缀的派生变量照常导出
+    out = export_workbook(CAND_YAML, tmp_path / "c.xlsx")
+    ws = load_workbook(out)["输入"]
+    header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    assert header == ["名称", "匹配", "重复键", "排序", "分隔符", "空值占位", "带序号", "文件", "说明"]
+    rows = {ws.cell(r, 1).value: [ws.cell(r, c).value for c in range(2, 9)] for r in (2, 3, 4)}
+    assert rows["推荐"] == ["岗位编码", "拼接", "推荐时间 降序", None, "NA", None, "推荐记录.xlsx"]
+    assert rows["冻结"] == ["工号 = 岗位.现任工号", "拼接", "冻结开始 降序", None, None, "是", "冻结记录.xlsx"]
+    p = tmp_path / "g.yaml"
+    p.write_text(CAND_YAML.read_text(encoding="utf-8").replace("带序号: 是", "带序号: 否"), encoding="utf-8")
+    res = diff_rules(CAND_EXCEL, p)
+    assert any(d.startswith("输入「冻结」的拼接选项") for d in res.differences)
 
 
 def test_yaml_outside_subset_reports_rule(tmp_path):

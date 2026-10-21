@@ -10,11 +10,13 @@ from rule_sheet import cli
 from rule_sheet.loaders import load_rules
 from rule_sheet.style import FILLS, HEADER_FILL, ID_KINDS, KV_WIDTH_BOUNDS, WIDTH_BOUNDS, display_width, format_workbook
 
-from .conftest import CARRY_EXCEL, EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, YAML_RULES
+from .conftest import CAND_EXCEL, CARRY_EXCEL, EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, YAML_RULES
 from .test_loaders import HEADER, RULE, TEST_HEADER, make_workbook
 
 SAMPLES = pytest.mark.parametrize(
-    "path", [EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, CARRY_EXCEL], ids=["customer", "status", "tags", "carry"]
+    "path",
+    [EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, CARRY_EXCEL, CAND_EXCEL],
+    ids=["customer", "status", "tags", "carry", "cand"],
 )
 
 
@@ -63,7 +65,7 @@ def test_sample_workbooks_follow_the_spec(path):
     ws = wb["决策表"]
     assert ws.cell(1, 1).value == "命中策略" and ws.cell(1, 1).font.bold and color(ws.cell(1, 3)) == FILLS["说明"]
     kv_sheets = [s for s in ("输入", "设置", "变量定义", "字段组") if s in wb.sheetnames]
-    assert len(kv_sheets) >= 3  # 变量定义 / 字段组 都是可选的, 但每个样例至少有一个
+    assert len(kv_sheets) >= 2  # 设置 / 变量定义 / 字段组 都是可选的, 但每个样例至少有一个
     for sheet in kv_sheets:
         ws = wb[sheet]
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]

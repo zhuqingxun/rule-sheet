@@ -26,6 +26,7 @@ uv 项目, src 布局, `rule-sheet` 命令, pytest 套件。2026-10-19 从 `D:/C
 | `examples/status-machine/` | 第二个样例: 字段名含 `-` / 输出格 `清空` / 命中策略 `首次命中` (2026-10-19 为 issue #1-#4 加); 0.3 (issue #5-#8) 扩成: 决策表同 ID 续行表达跨变量 OR、变量定义里 `且` / `或`、测试 sheet 表头从第 1 行开始 |
 | `examples/position-tags/` | 第三个样例 (0.6, issue #9-#16): 多标签分类, 命中策略 `多条拼接`、单元格文本关键字 `包含` / `不包含` / `开头是`、清单文件当参照表 (`关键岗位清单.存在`)、`数字()` / `N天` / `如果()` / `拼接()` |
 | `examples/carry-forward/` | 第四个样例 (0.7, issue #21): 跨批次带入, 「字段组」sheet / YAML `字段组:` 给六列起名 `会议记录`, 决策表里以组名为列名的输出格写 `上期` 整组复制、显式列优先; 没有「变量定义」sheet |
+| `examples/candidate-rollup/` | 第五个样例 (0.7, issue #17): 候选人汇总, 「输入」里 `重复键: 拼接` + 排序 / 空值占位 / 带序号, 带输入前缀的派生变量 `推荐.现岗` / `冻结.期间`; 没有「设置」sheet |
 | `tests/` | 单元格语法 / 表达式 / 引擎 / 加载器 / 端到端 |
 
 ## 运行与验证
@@ -42,12 +43,13 @@ uv run python examples/customer-sync/make_samples.py       # 改了样例设计�
 uv run python examples/status-machine/make_samples.py      # 第二个样例同理
 uv run python examples/position-tags/make_samples.py       # 第三个样例同理
 uv run python examples/carry-forward/make_samples.py       # 第四个样例同理
+uv run python examples/candidate-rollup/make_samples.py    # 第五个样例同理
 uv run rule-sheet format examples/customer-sync/规则_决策表.xlsx   # 按版式规范重排任意规则工作簿 (原地)
 uv run rule-sheet export examples/customer-sync/规则_决策表.xlsx -o /tmp/r.yaml   # Excel -> YAML 无损导出
 uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/customer-sync/rules.yaml   # 语义比对, 一致返回 0
 ```
 
-验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 7 行变更 / 10 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败; position-tags 8 行变更 / 8 条内嵌用例, 每行的 命中规则 / 标签 / 显示名 都有预期值; carry-forward 5 行变更 / 6 条内嵌用例, 两前端加载后 `Rule.outputs` 展开结果逐条相同)。改解释器语义后必须跑全量, 不要只跑一个前端。
+验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 7 行变更 / 10 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败; position-tags 8 行变更 / 8 条内嵌用例, 每行的 命中规则 / 标签 / 显示名 都有预期值; carry-forward 5 行变更 / 6 条内嵌用例, 两前端加载后 `Rule.outputs` 展开结果逐条相同; candidate-rollup 4 行变更 / 4 条内嵌用例, 每行的聚合文本都有预期值)。改解释器语义后必须跑全量, 不要只跑一个前端。
 
 ## 执行管线 (跨文件, 改引擎前先读)
 
@@ -70,6 +72,7 @@ uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/c
 
 - **读表**: 一律走 `engine.read_table` (`dtype=object` + `infer_objects`)。pandas 3 的 `read_excel` 默认把文本单元格的 "007" 读成 7、电话读成浮点, 直接用会丢数据 (2026-10-19 实测 pandas 3.0.6)
 - **匹配**: 输入 ≥ 1, 恰一个主表 (输出的行 / 写回的列都是它的); 每个参照表单独按自己的键 left join 到主表 (左侧只带主表键列, 参照表之间同名列互不干扰; 参照表键为空的行先剔掉, 否则 pandas merge 把 NaN 配 NaN 让 `存在` 假阳性), 变量命名 `<输入名>.<列>`, 内置 `<参照表名>.存在`、`基准日期`; 参照表的键列不暴露。输入名对引擎是不透明字符串, 不要在引擎里写死 本期 / 上期 / 客户
+- **匹配层聚合** (0.7, `model.CONCAT_POLICY`): `重复键: 拼接` 的参照表在 join 前由 `engine._concat_rows` 按 `InputSpec.sort` 排 (空值末尾) 后 groupby 接成一键一行 (`_concat_group`: 占位符保位置、带序号、没占位符且整组全空为空); 名字带输入前缀的派生变量 (`RuleSet.input_derived`) 由 `_add_input_derived` 在那张表自己的行上算、发生在聚合之前, `add_derived` 只算 `plain_derived`, `case_namespace` 把它们当普通变量 (用例直接给值)。四个选项 (`CONCAT_OPTS`) 只在 拼接 时允许, 加载器 `_build_inputs` 拦; convert 的 `_concat_opts` 两个方向共用, diff 比它。`拼接()` 只看列参数 (全空才为空), 字面量不算数。消费方直接调 `apply_rules()`, 所以 `build_namespace` / `add_derived` / `apply_rules` 是公开接口, 只加可选参数
 - **路径**: 规则文件里的相对路径 (默认文件 / 输出) 以规则文件所在目录为基准 (`--base-dir` 可覆盖); 命令行 `-i` 给的相对当前目录。默认输出 `output/<主表文件名>_更新后.xlsx`
 - **单元格条件** (FEEL 一元测试子集): `-` 不关心 / 字面量等于 / 比较 (右侧可为变量名, 不是表达式; 要算的东西放变量定义) / `[a..b]` 区间 / 逗号枚举 (OR) / `= 空` `!= 空` `空` (同义: `为空` `非空`) / `not(...)` / 文本关键字 `包含 a, b` `不包含` `开头是` `开头不是` `结尾是` `结尾不是` (关键字后要有空格或括号, 逗号项任一命中, 空值不成立)
 - **空值语义**: 空值参与任何比较都不成立 (SQL 风格), 单元格和表达式一样 (0.3 起表达式经 AST 改写; 0.2 的表达式 `!=` 对空值为真); 单元格 `not(...)` 只对有值的格成立, 仅 `not(空)` / `not(为空)` / `not(非空)` 是纯否定; 表达式的 `非` 和 YAML 的 `不满足:` 是纯取反 (空值行也为真), 这是保留的不对称, 见 `docs/设计架构.md` 5.3
@@ -84,10 +87,10 @@ uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/c
 
 ## 约定
 
-- 中文 DSL 关键词是产品的一部分, 改名需同步 README 速查表、样例文件、`tests/test_unary.py`; 加内置函数要同步前三个样例「变量定义」sheet 的「可用函数」提示行并重新生成 xlsx (carry-forward 没有变量定义 sheet)
+- 中文 DSL 关键词是产品的一部分, 改名需同步 README 速查表、样例文件、`tests/test_unary.py`; 加内置函数要同步各样例「变量定义」sheet 的「可用函数」提示行并重新生成 xlsx (carry-forward 没有变量定义 sheet)
 - issue #17–#22 的统一框架 (规则层逐行不动, 跨行进匹配层, 跨列用字段组) 与各条拟采用的写法在 issue 评论里; 0.7 做完 #21, 其余等消费方回复追问后按 #17 → #19 → #18 → #20 → #22 推进, 落地时在 `docs/设计架构.md` 5.13 补记
 - 样例数据的每一行对应一种规则情形 (见 README「样例数据设计」), 加规则时同步加数据行、Excel 测试 sheet 用例、YAML 测试用例, 并重新生成 xlsx
-- 版式只在 `style.py` 一处定义 (`FILLS` / `WIDTH_BOUNDS` / `KV_WIDTH_BOUNDS` 等), 生成脚本里不写颜色和列宽; 改规范要同步 `docs/使用指南.md` 3.6 的表并重新生成四个样例 (`tests/test_style.py` 对照常量校验样例)
+- 版式只在 `style.py` 一处定义 (`FILLS` / `WIDTH_BOUNDS` / `KV_WIDTH_BOUNDS` 等), 生成脚本里不写颜色和列宽; 改规范要同步 `docs/使用指南.md` 3.6 的表并重新生成全部样例 (`tests/test_style.py` 对照常量校验样例)
 - 生成的 xlsx 进 git (体积小, 便于直接打开看), `examples/*/output/` 不进
 - 版本号在 `pyproject.toml` 与 `src/rule_sheet/__init__.py` 两处, 同步改
 - `examples/**` 被 ruff format 排除并忽略 E501: `make_samples.py` 里的规则表是手工按列对齐的, 不要去「修」它的格式

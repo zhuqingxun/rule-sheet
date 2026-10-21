@@ -136,14 +136,20 @@ def _text_test(fname: str, pred: Callable[[str, str], bool], *, negate: bool = F
 
 
 def _concat(*parts: Any) -> Any:
-    """拼接(a, b, ...): 空值当作空字符串; 全部参数都为空时结果是空值 (而不是空串, 否则审计列与写出的文件对不上)。"""
+    """拼接(a, b, ...): 空值当作空字符串; 所有**列**参数都为空时结果是空值, 字面量不算数:
+    `拼接(x, "元")` 在 x 为空时为空, `拼接(部门, "-", 岗位, "-", 职级)` 三列全空为空、部分空出 `部门--职级`。
+    0.6 是所有参数都为空才为空, 混着字面量时永远不为空, 组合表达式「全空记空」就写不出来 (issue #17)。
+    没有列参数 (全是标量) 时仍按全部为空判。"""
     if not parts:
         raise ValueError("拼接() 至少要给一个参数")
     _reject_null("拼接", *parts)
+    columns = [i for i, p in enumerate(parts) if isinstance(p, pd.Series)]
+    watch = columns or list(range(len(parts)))
 
     def one(*vals: str | None) -> str | None:
-        texts = [v for v in vals if v is not None]
-        return "".join(texts) if texts else None
+        if all(vals[i] is None for i in watch):
+            return None
+        return "".join(v for v in vals if v is not None)
 
     return _rowwise(one, *[_texts(p) for p in parts])
 

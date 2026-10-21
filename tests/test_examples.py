@@ -9,6 +9,8 @@ from rule_sheet.engine import run, run_tests
 from rule_sheet.loaders import load_rules
 
 from .conftest import (
+    CAND_EXCEL,
+    CAND_YAML,
     CARRY_DIR,
     CARRY_EXCEL,
     CARRY_YAML,
@@ -25,6 +27,7 @@ FRONTENDS = pytest.mark.parametrize("rules_file", [EXCEL_RULES, YAML_RULES], ids
 STATUS_FRONTENDS = pytest.mark.parametrize("rules_file", [STATUS_EXCEL, STATUS_YAML], ids=["excel", "yaml"])
 TAGS_FRONTENDS = pytest.mark.parametrize("rules_file", [TAGS_EXCEL, TAGS_YAML], ids=["excel", "yaml"])
 CARRY_FRONTENDS = pytest.mark.parametrize("rules_file", [CARRY_EXCEL, CARRY_YAML], ids=["excel", "yaml"])
+CAND_FRONTENDS = pytest.mark.parametrize("rules_file", [CAND_EXCEL, CAND_YAML], ids=["excel", "yaml"])
 
 EXPECTED_HITS = {
     "C001": "R1",
@@ -292,6 +295,74 @@ def test_field_group_named_like_a_real_column_is_an_error(tmp_path):
     assert "岗位名称" in rs.field_groups  # 加载时没有数据, 查不出撞名
     with pytest.raises(ValueError, match="字段组「岗位名称」与主表「本期」的列同名"):
         run(p, base_dir=CARRY_DIR, dry_run=True)
+
+
+# ---------------------------------------------------------------------------
+# 第五个样例 candidate-rollup: 重复键 拼接 (排序 / 空值占位 / 带序号) + 带输入前缀的派生变量
+# ---------------------------------------------------------------------------
+
+CAND_OUTPUTS = ["拟任人工号", "拟任人姓名", "拟任人现岗", "推荐时间", "冻结期间", "冻结依据"]
+CAND_EXPECTED = {  # 岗位编码 -> (命中规则, 拟任人工号, 拟任人现岗, 推荐时间, 冻结期间, 冻结依据)
+    "P1": (
+        "P1; F1",
+        "E2;E1;E3",  # 推荐时间 降序, 没有推荐时间的排末尾
+        "-经理-23级;财务部-会计-22级;人事部-主管-21级",  # 聚合前逐行算的 推荐.现岗; 现部门为空出 -经理-23级
+        "2026-10-01;2026-09-01;NA",
+        "1.2026-09-01~2026-09-30;2.2026-05-01~2026-05-31",  # 带序号
+        "1.审计;2.纪律",
+    ),
+    "P2": ("P1", "E4;E7", "市场部-经理-;销售部-主管-22级", "NA;NA", None, None),  # 整组全空仍占位, 顺序按原文件
+    "P3": ("F1", None, None, None, "1.2026-08-10~", "1.休假"),  # 冻结结束为空: 拼接() 部分空
+    "P4": ("P1", "E5;E6", "NA;研发部-工程师-20级", "2026-07-01;2026-06-01", None, None),  # 三列全空 -> 现岗 空 -> NA
+}
+
+
+@CAND_FRONTENDS
+def test_cand_concat_inputs_load(rules_file):
+    rs = load_rules(rules_file)
+    rec, frz = rs.lookups
+    assert (rec.dup_policy, rec.sort, rec.sep, rec.placeholder, rec.numbered) == (
+        "拼接",
+        [("推荐时间", False)],
+        ";",
+        "NA",
+        False,
+    )
+    assert (frz.keys, frz.dup_policy, frz.sort, frz.numbered) == (
+        [("工号", "现任工号")],
+        "拼接",
+        [("冻结开始", False)],
+        True,
+    )
+    assert [k for k, _ in rs.input_derived] == ["推荐.现岗", "冻结.期间"] and rs.plain_derived == []
+    assert {"推荐.现岗", "冻结.期间", "推荐.现部门", "冻结.冻结结束"} <= set(rs.variables)
+    outcomes = run_tests(rs)
+    assert len(outcomes) == 4
+    assert all(o.passed for o in outcomes), [(o.name, o.problems, o.error) for o in outcomes if not o.passed]
+
+
+@CAND_FRONTENDS
+def test_cand_real_data_aggregates_in_matching_layer(rules_file, tmp_path):
+    res = run(rules_file, output=tmp_path / "out.xlsx")
+    assert not res.stopped_by_tests and res.out is not None
+    assert any("输入「推荐」有 4 行重复键, 按「拼接」接成一行" in n for n in res.notes)
+    row = res.out.set_index("岗位编码")
+    for code, (hits, emp, pos, when, period, basis) in CAND_EXPECTED.items():
+        got = tuple(
+            None if pd.isna(v) else v for v in row.loc[code, ["命中规则", *CAND_OUTPUTS[0:1], *CAND_OUTPUTS[2:]]]
+        )
+        assert got == (hits, emp, pos, when, period, basis), code
+    assert row.loc["P1", "拟任人姓名"] == "李四;张三;王五"
+    assert len(res.changed) == 4
+    back = pd.read_excel(res.written).set_index("岗位编码")
+    assert back.loc["P2", "推荐时间"] == "NA;NA" and pd.isna(back.loc["P3", "拟任人工号"])
+
+
+def test_cand_frontends_agree(tmp_path):
+    a = run(CAND_EXCEL, output=tmp_path / "a.xlsx").out
+    b = run(CAND_YAML, output=tmp_path / "b.xlsx").out
+    cols = ["岗位编码", *CAND_OUTPUTS, "命中规则", "变更明细"]
+    pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
 
 
 def test_cli_run_and_test(tmp_path, capsys):

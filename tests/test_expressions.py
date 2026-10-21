@@ -152,6 +152,15 @@ def test_concat_treats_null_as_empty_and_all_null_as_null(ns_text):
         True,
         False,
     ]
+    # 0.7 (issue #17): 字面量不算数, 所有列参数都为空才为空: 拼接(x, "元") 在 x 为空时为空, 而不是 "元";
+    # 组合表达式 {部门}-{岗位} 全空为空 (再被 空值占位 换成 NA), 部分空出 "部门-"
+    out = eval_expr('拼接(本期.一层组织, "-", 本期.岗位名称)', ns_text)
+    assert out.tolist()[2:4] == ["3-华东-", "-法务部"]
+    both_null = {"a": pd.Series([None, "x"], dtype=object), "b": pd.Series([None, None], dtype=object)}
+    out = eval_expr('拼接(a, "-", b, "元")', both_null)
+    assert pd.isna(out.iloc[0]) and out.iloc[1] == "x-元"
+    assert pd.isna(eval_expr('拼接(x, "元")', {"x": pd.Series([None], dtype=object)}).iloc[0])
+    assert eval_expr('拼接("a", "b")', {}) == "ab"  # 没有列参数: 全是字面量照常接
     with pytest.raises(ValueError, match="参数不能是 空"):
         eval_expr("拼接(本期.工号, 空)", ns_text)
 

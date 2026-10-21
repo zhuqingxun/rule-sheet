@@ -18,6 +18,7 @@ from .loaders import load_rules
 from .model import (
     BASE_DATE_VAR,
     CLEAR,
+    CONCAT_POLICY,
     DEFAULT_JOIN_SEP,
     EXIST_VAR,
     EXPECT_NULL_WORDS,
@@ -26,6 +27,7 @@ from .model import (
     NULL,
     NULL_WORD,
     TRUE_WORDS,
+    InputSpec,
     Namespace,
     Rule,
     RuleSet,
@@ -78,9 +80,68 @@ def read_table(path: str | Path, sheet: str | None = None) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _add_input_derived(rs: RuleSet, spec: InputSpec, df: pd.DataFrame, base_date: pd.Timestamp) -> pd.DataFrame:
+    """带输入前缀的派生变量 (`报表7.现岗`): 在那张表自己的行上逐行算, 发生在匹配 / 聚合之前, 只能引用同一张表的列。"""
+    mine = [k for k, _ in rs.input_derived if k.partition(".")[0] == spec.name]
+    if not mine:
+        return df
+    df = df.copy()
+    local: Namespace = {f"{spec.name}.{c}": df[c] for c in df.columns}
+    local[BASE_DATE_VAR] = base_date
+    for name, expr in rs.input_derived:
+        if name not in mine:
+            continue
+        col = name.partition(".")[2]
+        if col in df.columns:
+            raise ValueError(f"派生变量「{name}」与输入「{spec.name}」的列「{col}」同名; 换个名字")
+        try:
+            val = eval_expr(expr, local)
+        except ValueError as exc:
+            raise ValueError(f"派生变量「{name}」在输入「{spec.name}」的行上求值失败: {exc}") from exc
+        if val is NULL:
+            val = None
+        df[col] = val if isinstance(val, pd.Series) else pd.Series([val] * len(df), index=df.index)
+        local[name] = df[col]
+    return df
+
+
+def _concat_group(values: list[Any], spec: InputSpec) -> str | None:
+    """重复键: 拼接 下一个键的一列 -> 一个文本: 空格子换成占位符 (位置保留), 可带序号; 没设占位符且整组全空则为空。"""
+    items = [None if is_na(v) else text_of(v) for v in values]
+    if not spec.placeholder and all(i is None for i in items):
+        return None
+    texts = [spec.placeholder if i is None else i for i in items]
+    if spec.numbered:
+        texts = [f"{n}.{t}" for n, t in enumerate(texts, 1)]
+    return spec.sep.join(texts)
+
+
+def _concat_rows(spec: InputSpec, df: pd.DataFrame, mine: list[str]) -> pd.DataFrame:
+    """同键的行按 spec.sort 排 (空值一律排末尾), 每个非键列各自接成一个文本, 一个键一行。"""
+    if spec.sort:
+        missing = [c for c, _ in spec.sort if c not in df.columns]
+        if missing:
+            raise ValueError(f"输入「{spec.name}」没有排序列「{missing[0]}」")
+        df = df.sort_values(
+            by=[c for c, _ in spec.sort], ascending=[a for _, a in spec.sort], na_position="last", kind="stable"
+        )
+    cols = [c for c in df.columns if c not in mine]
+    if not cols:
+        return df.drop_duplicates(subset=mine)
+    grouped = df.groupby(mine, sort=False)[cols].agg(lambda s: _concat_group(s.tolist(), spec))
+    return grouped.reset_index()
+
+
 def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[str] | None = None) -> Namespace:
+    """以主表为锚, 每个参照表按各自的键 left join 进来。
+
+    匹配之前先在每张表自己的行上算带该表前缀的派生变量 (`报表7.现岗`); `重复键: 拼接` 的参照表再按键聚合成一键一行。
+    直接调 apply_rules 的编排器必须从这里拿命名空间, 聚合 / 追加都发生在这一步。
+    """
     primary = rs.primary
-    base = tables[primary.name]
+    base_date_raw = rs.settings.get(BASE_DATE_VAR)
+    base_date = pd.Timestamp(base_date_raw) if base_date_raw else pd.Timestamp(date.today())
+    base = _add_input_derived(rs, primary, tables[primary.name], base_date)
     ns: Namespace = {f"{primary.name}.{col}": base[col] for col in base.columns}
     for spec in rs.lookups:
         df = tables[spec.name]
@@ -95,15 +156,22 @@ def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[st
             if c not in df.columns:
                 raise ValueError(f"输入「{spec.name}」没有匹配键列「{c}」")
         df = df[df[mine].notna().all(axis=1)]  # 键为空的行不参与匹配: pandas merge 会把两边的 NaN 配成一对
+        df = _add_input_derived(rs, spec, df, base_date)
         dup = df.duplicated(subset=mine, keep="first")
         if dup.any():
-            if spec.dup_policy != "取第一条":
+            if spec.dup_policy == CONCAT_POLICY:
+                if notes is not None:
+                    notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「{CONCAT_POLICY}」接成一行")
+            elif spec.dup_policy != "取第一条":
                 raise ValueError(
                     f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 而它的「重复键」设置为 {spec.dup_policy}"
                 )
-            if notes is not None:
-                notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「取第一条」处理")
-            df = df[~dup]
+            else:
+                if notes is not None:
+                    notes.append(f"输入「{spec.name}」有 {int(dup.sum())} 行重复键, 按「取第一条」处理")
+                df = df[~dup]
+        if spec.dup_policy == CONCAT_POLICY:
+            df = _concat_rows(spec, df, mine)  # 没有重复键也走一遍: 单条记录同样要占位 / 带序号, 形态一致
         # 左侧只带主表的键列, 参照表之间同名列互不干扰; 参照表里与主表键列同名的非键列保留参照表的 (主表的加后缀)
         merged = base[theirs].merge(df, left_on=theirs, right_on=mine, how="left", suffixes=("__p", ""), indicator=True)
         merged.index = base.index
@@ -111,14 +179,15 @@ def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[st
             if col not in mine:
                 ns[f"{spec.name}.{col}"] = merged[col]
         ns[f"{spec.name}.{EXIST_VAR}"] = merged["_merge"].eq("both")
-    base_date = rs.settings.get(BASE_DATE_VAR)
-    ns[BASE_DATE_VAR] = pd.Timestamp(base_date) if base_date else pd.Timestamp(date.today())
+    ns[BASE_DATE_VAR] = base_date
     return ns
 
 
 def add_derived(rs: RuleSet, ns: Namespace, index: pd.Index, *, lenient: bool) -> None:
-    """按定义顺序求派生变量。测试用例里直接给了值的不再推导; lenient 下求值失败置空。"""
-    for name, expr in rs.derived:
+    """按定义顺序求派生变量。测试用例里直接给了值的不再推导; lenient 下求值失败置空。
+
+    带输入前缀的派生变量不在这里算: 真实数据里 build_namespace 已在那张表的行上算过, 用例里直接给值。"""
+    for name, expr in rs.plain_derived:
         if name in ns:
             continue
         try:
@@ -288,7 +357,7 @@ class TestOutcome:
 def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.Series]]:
     """把一条用例构造成 1 行的命名空间 (含派生变量) 和各输出列的原值; run_tests 与 diff 的交叉验证共用。"""
     exist_vars = {f"{s.name}.{EXIST_VAR}" for s in rs.lookups}
-    derived_names = {d for d, _ in rs.derived}
+    derived_names = {d for d, _ in rs.plain_derived}  # 带输入前缀的派生变量按普通变量对待: 给了用, 没给为空
     index = pd.RangeIndex(1)
     ns: Namespace = {}
     for name, val in tc.inputs.items():

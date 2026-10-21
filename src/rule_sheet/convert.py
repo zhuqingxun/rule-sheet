@@ -29,6 +29,9 @@ from .loaders import RawRule, load_excel_raw, load_rules, load_yaml_rules
 from .model import (
     BASE_DATE_VAR,
     BLANK_WORDS,
+    CONCAT_OPTS,
+    CONCAT_POLICY,
+    DEFAULT_CONCAT_SEP,
     EXIST_VAR,
     FALSE_WORDS,
     FIELD_GROUP_KEY,
@@ -216,6 +219,22 @@ def _match_text(spec: Any, primary: str) -> str:
     return ", ".join(m if m == t else f"{m} = {primary}.{t}" for m, t in spec.keys)
 
 
+def _concat_opts(spec: Any) -> dict[str, Any]:
+    """重复键: 拼接 的四个可选项 (只写非默认的), Excel 的「输入」sheet 与 YAML 的输入声明共用。"""
+    if spec.primary or spec.dup_policy != CONCAT_POLICY:
+        return {}
+    out: dict[str, Any] = {}
+    if spec.sort:
+        out["排序"] = ", ".join(f"{c} {'升序' if asc else '降序'}" for c, asc in spec.sort)
+    if spec.sep != DEFAULT_CONCAT_SEP:
+        out["分隔符"] = spec.sep
+    if spec.placeholder:
+        out["空值占位"] = spec.placeholder
+    if spec.numbered:
+        out["带序号"] = "是"
+    return out
+
+
 def _rule_doc(tr: CellTranslator, r: RawRule) -> dict[str, Any]:
     doc: dict[str, Any] = {"编号": r.rule_id}
     if r.desc:
@@ -248,6 +267,7 @@ def excel_to_yaml_doc(path: str | Path) -> tuple[dict[str, Any], RuleSet]:
         entry["匹配"] = _match_text(s, primary)
         if not s.primary and s.dup_policy != "取第一条":
             entry["重复键"] = s.dup_policy
+        entry.update(_concat_opts(s))
         doc["输入"][s.name] = FlowDict(entry)
     if rs.settings:
         doc["设置"] = {k: _plain(v) for k, v in rs.settings.items()}
@@ -593,9 +613,15 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = "输入"
-    ws.append(["名称", "匹配", "重复键", "文件", "说明"])
+    opt_cols = list(CONCAT_OPTS) if any(_concat_opts(s) for s in rs.inputs) else []
+    ws.append(["名称", "匹配", "重复键", *opt_cols, "文件", "说明"])
     for s in rs.inputs:
-        ws.append([s.name, _match_text(s, primary), None if s.primary else s.dup_policy, s.path, None])
+        opts = _concat_opts(s)
+        ws.append(
+            [s.name, _match_text(s, primary), None if s.primary else s.dup_policy]
+            + [opts.get(k) for k in opt_cols]
+            + [s.path, None]
+        )
     if rs.settings:
         ws = wb.create_sheet("设置")
         ws.append(["设置项", "值", "说明"])
@@ -696,6 +722,8 @@ def _structure_diff(a: RuleSet, b: RuleSet, res: DiffResult) -> None:
         if (sa.primary, sa.keys, sa.dup_policy) != (sb.primary, sb.keys, sb.dup_policy):
             ka, kb = sa.keys or PRIMARY_WORD, sb.keys or PRIMARY_WORD
             res.differences.append(f"输入「{n}」: A 匹配 {ka} / {sa.dup_policy}, B {kb} / {sb.dup_policy}")
+        elif _concat_opts(sa) != _concat_opts(sb):
+            res.differences.append(f"输入「{n}」的拼接选项: A {_concat_opts(sa)}, B {_concat_opts(sb)}")
         if sa.path != sb.path:
             res.notes.append(f"输入「{n}」的默认文件不同: A {sa.path}, B {sb.path}")
     for k in sorted(set(a.settings) | set(b.settings)):

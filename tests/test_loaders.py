@@ -560,6 +560,84 @@ def test_yaml_inputs_and_settings(tmp_path):
         load_yaml_rules(p)
 
 
+CONCAT_INPUTS = [
+    ["名称", "匹配", "重复键", "排序", "分隔符", "空值占位", "带序号", "文件"],
+    ["主表", "主表", None, None, None, None, None, "a.xlsx"],
+    ["推荐", "k", "拼接", "时间 降序, 工号", "/", "NA", "是", None],
+    ["冻结", "k", "拼接", None, None, None, None, None],  # 四个可选项都留空 = 默认
+]
+
+
+def test_excel_inputs_concat_options(tmp_path):
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=CONCAT_INPUTS))
+    a, b = rs.lookups
+    assert (a.dup_policy, a.sort, a.sep, a.placeholder, a.numbered) == (
+        "拼接",
+        [("时间", False), ("工号", True)],
+        "/",
+        "NA",
+        True,
+    )
+    assert (b.dup_policy, b.sort, b.sep, b.placeholder, b.numbered) == ("拼接", [], ";", "", False)
+
+
+def _with(rows, i, col, value):
+    out = [list(r) for r in rows]
+    out[i][CONCAT_INPUTS[0].index(col)] = value
+    return out
+
+
+@pytest.mark.parametrize(
+    ("inputs", "msg"),
+    [
+        (_with(CONCAT_INPUTS, 1, "排序", "k"), "主表「主表」不能写「排序」"),
+        (
+            _with(_with(CONCAT_INPUTS, 2, "重复键", "取第一条"), 2, "分隔符", None),
+            "输入「推荐」写了「排序」, 但「重复键」是 取第一条",
+        ),
+        (_with(CONCAT_INPUTS, 2, "排序", "时间 倒序"), "输入「推荐」的「排序」写法不对"),
+        (_with(CONCAT_INPUTS, 2, "带序号", "对"), "「带序号」只认 是 / 否"),
+    ],
+)
+def test_excel_inputs_concat_errors(tmp_path, inputs, msg):
+    with pytest.raises(ValueError, match=msg):
+        load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=inputs))
+
+
+def test_yaml_inputs_concat_options(tmp_path):
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "输入:\n  本期: {匹配: 主表}\n"
+        "  推荐: {匹配: k, 重复键: 拼接, 排序: 时间 降序, 空值占位: NA, 带序号: 是}\n规则: []\n",
+        encoding="utf-8",
+    )
+    s = load_yaml_rules(p).lookups[0]
+    assert (s.dup_policy, s.sort, s.sep, s.placeholder, s.numbered) == ("拼接", [("时间", False)], ";", "NA", True)
+    p.write_text("输入:\n  本期: {匹配: 主表}\n  推荐: {匹配: k, 分隔符: '/'}\n规则: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="写了「分隔符」, 但「重复键」是 取第一条"):
+        load_yaml_rules(p)
+
+
+def test_input_prefixed_derived_is_a_variable_in_tests(tmp_path):
+    """变量定义里名字带输入前缀的 (本月.x) 是「在那张表的行上算」的派生变量: 进变量清单, 用例里直接给值、不推导。"""
+    from rule_sheet.engine import run_tests
+
+    p = make_workbook(
+        tmp_path / "r.xlsx",
+        [["规则ID", "输入", "输出"], ["规则ID", "本月.x", "标记"], ["R1", "非空", "有"]],
+        [
+            ["用例", "输入", "输入", "期望"],
+            ["用例", "本月.x", "本月.a", "标记"],
+            ["T1", "pq", None, "有"],
+            ["T2", None, "p", None],  # 没给 本月.x 就是空, 不从 a / b 推导
+        ],
+        derived=[("本月.x", "拼接(本月.a, 本月.b)")],
+    )
+    rs = load_rules(p)
+    assert rs.variables == ["本月.x", "本月.a", "本月.b"] and rs.input_derived == [("本月.x", "拼接(本月.a, 本月.b)")]
+    assert [o.passed for o in run_tests(rs)] == [True, True]
+
+
 def test_missing_file_and_missing_sheet(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_rules(tmp_path / "nope.xlsx")

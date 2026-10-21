@@ -21,8 +21,12 @@ from .model import (
     BASE_DATE_VAR,
     BLANK_WORDS,
     CLEAR_WORDS,
+    CONCAT_OPTS,
+    CONCAT_POLICY,
+    DEFAULT_CONCAT_SEP,
     DUP_POLICIES,
     EXIST_VAR,
+    FALSE_WORDS,
     FIELD_GROUP_KEY,
     HIT_POLICIES,
     JOIN_POLICY,
@@ -30,6 +34,7 @@ from .model import (
     NULL_WORD,
     PRIMARY_WORD,
     SETTING_KEYS,
+    TRUE_WORDS,
     Condition,
     InputSpec,
     Rule,
@@ -39,7 +44,8 @@ from .model import (
 
 RULE_KINDS = ("规则ID", "优先级", "输入", "输出", "说明")
 TEST_KINDS = ("用例", "输入", "期望", "说明")
-INPUT_COLS = ("名称", "匹配", "重复键", "文件", "说明")
+INPUT_COLS = ("名称", "匹配", "重复键", *CONCAT_OPTS, "文件", "说明")
+INPUT_KEYS = ("文件", "匹配", "重复键", *CONCAT_OPTS, "说明")  # YAML 输入声明认的键
 FIELD_GROUP_COLS = ("名称", "列名", "说明")
 POLICY_LABEL = "命中策略"
 LEGACY_DEFAULT_NAMES = ("主表", "本月")  # 0.4 以前「匹配设置」里左右表别名的默认值
@@ -113,8 +119,40 @@ def _parse_keys(text: str, name: str, primary: str, names: list[str], where: str
     return keys
 
 
-def _build_inputs(rows: list[tuple[str, Any, Any, Any]], where: str) -> list[InputSpec]:
-    """rows: (名称, 匹配, 重复键, 文件)。恰有一个输入的「匹配」写 主表 (只有一个输入时可省), 其它写对齐到主表的键。"""
+def _parse_sort(text: str, name: str, where: str) -> list[tuple[str, bool]]:
+    """「排序」格: `推荐时间 降序, 工号 升序`; 不写方向默认升序。"""
+    out: list[tuple[str, bool]] = []
+    for part in split_top_level(text):
+        words = part.split()
+        if len(words) == 1:
+            out.append((words[0], True))
+        elif len(words) == 2 and words[1] in ("升序", "降序"):
+            out.append((words[0], words[1] == "升序"))
+        else:
+            raise ValueError(
+                f"{where}: 输入「{name}」的「排序」写法不对 ({part.strip()!r}); "
+                f"写 列名 或 列名 升序 / 列名 降序, 多个用逗号分隔"
+            )
+    return out
+
+
+def _concat_options(opts: dict[str, Any], name: str, where: str) -> dict[str, Any]:
+    """重复键: 拼接 的四个可选项 -> InputSpec 字段。"""
+    numbered_text = _text(opts.get("带序号"))
+    if numbered_text and numbered_text not in TRUE_WORDS | FALSE_WORDS:
+        raise ValueError(f"{where}: 输入「{name}」的「带序号」只认 是 / 否, 不认识「{numbered_text}」")
+    sep = opts.get("分隔符")
+    return {
+        "sort": _parse_sort(_text(opts.get("排序")), name, where),
+        "sep": DEFAULT_CONCAT_SEP if sep in (None, "") else str(sep),
+        "placeholder": _text(opts.get("空值占位")),
+        "numbered": numbered_text in TRUE_WORDS,
+    }
+
+
+def _build_inputs(rows: list[tuple[str, Any, Any, Any, dict[str, Any]]], where: str) -> list[InputSpec]:
+    """rows: (名称, 匹配, 重复键, 文件, {排序 / 分隔符 / 空值占位 / 带序号})。
+    恰有一个输入的「匹配」写 主表 (只有一个输入时可省), 其它写对齐到主表的键。"""
     if not rows:
         raise ValueError(f"{where}: 没有声明任何输入")
     names = [r[0] for r in rows]
@@ -131,16 +169,27 @@ def _build_inputs(rows: list[tuple[str, Any, Any, Any]], where: str) -> list[Inp
         )
     primary = primaries[0]
     specs: list[InputSpec] = []
-    for name, match, dup_policy, path in rows:
+    for name, match, dup_policy, path, opts in rows:
         file = _text(path) or None
+        policy = _text(dup_policy) or "取第一条"
+        given = [k for k in CONCAT_OPTS if _text(opts.get(k))]
         if name == primary:
+            if given or _text(dup_policy):
+                raise ValueError(f"{where}: 主表「{name}」不能写「{(given or ['重复键'])[0]}」, 它们只对参照表有意义")
             specs.append(InputSpec(name, primary=True, path=file))
             continue
-        policy = _text(dup_policy) or "取第一条"
         if policy not in DUP_POLICIES:
             raise ValueError(f"{where}: 输入「{name}」的「重复键」只认 {' / '.join(DUP_POLICIES)}, 不认识「{policy}」")
+        if given and policy != CONCAT_POLICY:
+            raise ValueError(
+                f"{where}: 输入「{name}」写了「{given[0]}」, 但「重复键」是 {policy} 而不是 {CONCAT_POLICY}; "
+                f"排序 / 分隔符 / 空值占位 / 带序号 只在 重复键: {CONCAT_POLICY} 时有意义"
+            )
+        extra = _concat_options(opts, name, where) if policy == CONCAT_POLICY else {}
         specs.append(
-            InputSpec(name, keys=_parse_keys(_text(match), name, primary, names, where), dup_policy=policy, path=file)
+            InputSpec(
+                name, keys=_parse_keys(_text(match), name, primary, names, where), dup_policy=policy, path=file, **extra
+            )
         )
     return specs
 
@@ -329,7 +378,8 @@ def _read_inputs_sheet(ws: Any) -> list[InputSpec]:
     for row in grid[1:]:
         name = _text(_at(row, col["名称"]))
         if name:
-            rows.append((name, _at(row, col["匹配"]), _at(row, col.get("重复键")), _at(row, col.get("文件"))))
+            opts = {k: _at(row, col[k]) for k in CONCAT_OPTS if k in col}
+            rows.append((name, _at(row, col["匹配"]), _at(row, col.get("重复键")), _at(row, col.get("文件")), opts))
     return _build_inputs(rows, "「输入」sheet")
 
 
@@ -505,7 +555,10 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
     input_names = [n for _, k, n in cols if k == "输入"]
     texts = cell_texts + [e for _, e in derived]
-    extra = sorted({n for t in texts for n in find_names(t, names, known)} - set(input_names))
+    # 带输入前缀的派生变量 (报表7.现岗) 在用例里直接给值不推导, 也进变量清单 (没给的视为空)
+    input_derived = [k for k, _ in derived if "." in k and k.partition(".")[0] in names]
+    found = {n for t in texts for n in find_names(t, names, known)} | set(input_derived)
+    extra = sorted(found - set(input_names))
     variables = input_names + extra  # 表头输入列 + 单元格与派生变量表达式里引用的列, 用例没给的都视为空
     output_names = expand_output_names([n for _, k, n in cols if k == "输出"], groups)
 
@@ -562,12 +615,13 @@ def _yaml_inputs(doc: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
     rows = []
     for name, v in (doc.get("输入") or {}).items():
         if isinstance(v, dict):
-            bad = [k for k in v if k not in ("文件", "匹配", "重复键", "说明")]
+            bad = [k for k in v if k not in INPUT_KEYS]
             if bad:
-                raise ValueError(f"YAML 输入「{name}」里的「{bad[0]}」不认识, 只认: 文件 / 匹配 / 重复键 / 说明")
-            rows.append((str(name), v.get("匹配"), v.get("重复键"), v.get("文件")))
+                raise ValueError(f"YAML 输入「{name}」里的「{bad[0]}」不认识, 只认: {' / '.join(INPUT_KEYS)}")
+            opts = {k: v.get(k) for k in CONCAT_OPTS if k in v}
+            rows.append((str(name), v.get("匹配"), v.get("重复键"), v.get("文件"), opts))
         else:
-            rows.append((str(name), None, None, v))  # 只写一个字符串 = 文件名
+            rows.append((str(name), None, None, v, {}))  # 只写一个字符串 = 文件名
     inputs = _build_inputs(rows, "YAML 输入:")
     settings = _check_settings(dict(doc.get("设置") or {}), "YAML 设置:")
     return inputs, settings

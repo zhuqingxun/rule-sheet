@@ -16,7 +16,11 @@ HIT_POLICIES = ("优先级", "唯一", "首次命中", "多条拼接")
 JOIN_POLICY = "多条拼接"  # DMN 的 Collect: 每个输出列把所有命中规则的值按优先级顺序用分隔符拼起来 (多标签分类)
 JOIN_SEP_KEY = "拼接分隔符"  # 「设置」里给 多条拼接 用的分隔符
 DEFAULT_JOIN_SEP = "/"
-DUP_POLICIES = ("取第一条", "报错")  # 参照表匹配键重复时
+DUP_POLICIES = ("取第一条", "报错", "拼接")  # 参照表匹配键重复时; 拼接 = 同键的行按排序接成一行 (每列一个文本, 0.7)
+CONCAT_POLICY = "拼接"
+# 重复键: 拼接 的默认分隔符。与 多条拼接 的 / 是两个概念: 一个接同一个键的多条记录, 一个接多条规则的输出
+DEFAULT_CONCAT_SEP = ";"
+CONCAT_OPTS = ("排序", "分隔符", "空值占位", "带序号")  # 输入声明里只在 重复键: 拼接 时允许写的四个可选项
 PRIMARY_WORD = "主表"  # 「输入」里主表那一行的「匹配」写它: 输出的行就是主表的行, 其它输入都对齐到它
 SETTING_KEYS = ("基准日期", "输出", JOIN_SEP_KEY)
 FIELD_GROUP_KEY = "字段组"  # Excel sheet 名 / YAML 顶层键: 给一组列起个名字, 决策表里一格就能整组复制 / 清空
@@ -80,6 +84,11 @@ class InputSpec:
     keys: list[tuple[str, str]] = field(default_factory=list)  # (本输入的列, 主表的列); 主表为空
     dup_policy: str = "取第一条"  # 见 DUP_POLICIES
     path: str | None = None  # 可带 #sheet名
+    # 以下只在 dup_policy == 拼接 时有意义: 同键的行先按 sort 排 (空值一律排末尾), 每列各自接成一个文本
+    sort: list[tuple[str, bool]] = field(default_factory=list)  # [(列, 升序?)]
+    sep: str = DEFAULT_CONCAT_SEP
+    placeholder: str = ""  # 空值占位: 空格子换成它, 位置保留 (11 列之间按位置对齐); 留空 = 空文本
+    numbered: bool = False  # 带序号: 1.a;2.b (占位符也带序号)
 
 
 @dataclass
@@ -108,3 +117,16 @@ class RuleSet:
     @property
     def names(self) -> list[str]:
         return [s.name for s in self.inputs]
+
+    def is_input_derived(self, name: str) -> bool:
+        """带输入前缀的派生变量 (`报表7.现岗`): 在那张表自己的行上算, 发生在匹配 / 聚合之前; 用例里直接给值不推导。"""
+        prefix, dot, rest = name.partition(".")
+        return bool(dot and rest) and prefix in self.names
+
+    @property
+    def input_derived(self) -> list[tuple[str, str]]:
+        return [(k, v) for k, v in self.derived if self.is_input_derived(k)]
+
+    @property
+    def plain_derived(self) -> list[tuple[str, str]]:
+        return [(k, v) for k, v in self.derived if not self.is_input_derived(k)]

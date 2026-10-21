@@ -130,6 +130,85 @@ def test_missing_key_column():
         build_namespace(make_rs([], []), {"主表": pd.DataFrame({"编号": [1]}), "本月": pd.DataFrame({"b": [1]})})
 
 
+def test_concat_policy_aggregates_rows_before_join():
+    """重复键: 拼接 (issue #17): 同键的行按排序接成一行 (空值排末尾), 空值占位保位置, 带序号;
+    带输入前缀的派生变量在那张表的行上算、发生在聚合之前; 没设占位符且整组全空的列为空。"""
+    base = pd.DataFrame({"岗位": ["P1", "P2", "P3"], "现任": ["C1", "C2", None]})
+    rec = pd.DataFrame(
+        {
+            "岗位": ["P1", "P1", "P1", "P2"],
+            "工号": ["E1", "E2", "E3", "E4"],
+            "部门": ["财务", None, "人事", None],
+            "职级": ["22", "23", "21", None],
+            "时间": pd.to_datetime(["2026-09-01", "2026-10-01", None, None]),
+        }
+    )
+    frz = pd.DataFrame(
+        {
+            "工号": ["C1", "C1"],
+            "开始": pd.to_datetime(["2026-05-01", "2026-09-01"]),
+            "依据": ["纪律", "审计"],
+            "备注": [None, None],
+        }
+    )
+    rs = make_rs(
+        [],
+        [],
+        inputs=inputs_of(("岗位", None), ("推荐", ["岗位"]), ("冻结", ["工号=现任"])),
+        derived=[("推荐.现岗", '拼接(推荐.部门, "-", 推荐.职级)'), ("有推荐", "推荐.存在")],
+    )
+    rec_spec, frz_spec = rs.lookups
+    rec_spec.dup_policy, rec_spec.sort, rec_spec.placeholder = "拼接", [("时间", False)], "NA"
+    frz_spec.dup_policy, frz_spec.sort, frz_spec.numbered, frz_spec.sep = "拼接", [("开始", False)], True, "/"
+    assert rs.input_derived == [("推荐.现岗", '拼接(推荐.部门, "-", 推荐.职级)')] and rs.plain_derived == [
+        ("有推荐", "推荐.存在")
+    ]
+    notes: list[str] = []
+    ns = build_namespace(rs, {"岗位": base, "推荐": rec, "冻结": frz}, notes)
+    assert ns["推荐.工号"].tolist()[:2] == ["E2;E1;E3", "E4"] and pd.isna(ns["推荐.工号"].iloc[2])
+    assert ns["推荐.部门"].tolist()[:2] == ["NA;财务;人事", "NA"]
+    assert ns["推荐.现岗"].tolist()[:2] == ["-23;财务-22;人事-21", "NA"]  # 聚合前逐行算; 列参数全空为空, 再被占位
+    assert ns["推荐.时间"].tolist()[:2] == ["2026-10-01;2026-09-01;NA", "NA"]
+    assert ns["推荐.存在"].tolist() == [True, True, False]
+    assert ns["冻结.依据"].tolist()[0] == "1.审计/2.纪律" and pd.isna(ns["冻结.依据"].iloc[1])
+    assert pd.isna(ns["冻结.备注"].iloc[0])  # 没设占位符, 整组全空 -> 空
+    assert ns["冻结.存在"].tolist() == [True, False, False]
+    assert sum("按「拼接」接成一行" in n for n in notes) == 2
+    add_derived(rs, ns, base.index, lenient=False)
+    assert ns["有推荐"].tolist() == [True, True, False] and ns["推荐.现岗"].tolist()[0] == "-23;财务-22;人事-21"
+
+
+def test_concat_policy_errors():
+    base = pd.DataFrame({"岗位": ["P1"], "x": [1]})
+    rec = pd.DataFrame({"岗位": ["P1"], "工号": ["E1"]})
+    rs = make_rs([], [], inputs=inputs_of(("岗位", None), ("推荐", ["岗位"])))
+    rs.lookups[0].dup_policy, rs.lookups[0].sort = "拼接", [("时间", True)]
+    with pytest.raises(ValueError, match="输入「推荐」没有排序列「时间」"):
+        build_namespace(rs, {"岗位": base, "推荐": rec})
+    rs.lookups[0].sort = []
+    rs.derived = [("推荐.工号", "推荐.工号")]
+    with pytest.raises(ValueError, match="派生变量「推荐.工号」与输入「推荐」的列「工号」同名"):
+        build_namespace(rs, {"岗位": base, "推荐": rec})
+    rs.derived = [("推荐.y", "岗位.x")]  # 只能引用同一张表的列
+    with pytest.raises(ValueError, match="派生变量「推荐.y」在输入「推荐」的行上求值失败"):
+        build_namespace(rs, {"岗位": base, "推荐": rec})
+
+
+def test_input_prefixed_derived_is_given_not_computed_in_cases():
+    """带输入前缀的派生变量在用例里直接给值: 真实数据里它在聚合前算过, 用例里从聚合后的文本再推导是错的。"""
+    rs = make_rs(
+        [Rule("R1", 1, [cell_condition("本月.x", "非空")], {"y": "本月.x"})],
+        ["y"],
+        derived=[("本月.x", "拼接(本月.a, 本月.b)")],
+        variables=["本月.x", "本月.a", "本月.b"],
+        tests=[
+            TestCase("没给 x, 不从 a / b 推导", {"本月.a": "p", "本月.b": "q"}, {}),
+            TestCase("给了就用", {"本月.x": "p;q"}, {"y": "p;q"}),
+        ],
+    )
+    assert [(o.passed, o.hit) for o in run_tests(rs)] == [(True, ""), (True, "R1")]
+
+
 def test_split_sheet(tmp_path):
     plain = tmp_path / "a.xlsx"
     plain.write_bytes(b"")
