@@ -27,6 +27,7 @@ uv 项目, src 布局, `rule-sheet` 命令, pytest 套件。2026-10-19 从 `D:/C
 | `examples/position-tags/` | 第三个样例 (0.6, issue #9-#16): 多标签分类, 命中策略 `多条拼接`、单元格文本关键字 `包含` / `不包含` / `开头是`、清单文件当参照表 (`关键岗位清单.存在`)、`数字()` / `N天` / `如果()` / `拼接()` |
 | `examples/carry-forward/` | 第四个样例 (0.7, issue #21): 跨批次带入, 「字段组」sheet / YAML `字段组:` 给六列起名 `会议记录`, 决策表里以组名为列名的输出格写 `上期` 整组复制、显式列优先; 没有「变量定义」sheet |
 | `examples/candidate-rollup/` | 第五个样例 (0.7, issue #17): 候选人汇总, 「输入」里 `重复键: 拼接` + 排序 / 空值占位 / 带序号, 带输入前缀的派生变量 `推荐.现岗` / `冻结.期间`; 没有「设置」sheet |
+| `examples/period-diff/` | 第六个样例 (0.7, issue #18 + #19): 两期比对, 字段组 `对比字段` + 派生变量 `差异(本期, 上期, 对比字段)` + 上期 `独有行: 追加`, 首次命中 四条规则 ADDED / CHANGED / UNCHANGED / REMOVED |
 | `tests/` | 单元格语法 / 表达式 / 引擎 / 加载器 / 端到端 |
 
 ## 运行与验证
@@ -44,12 +45,13 @@ uv run python examples/status-machine/make_samples.py      # 第二个样例同�
 uv run python examples/position-tags/make_samples.py       # 第三个样例同理
 uv run python examples/carry-forward/make_samples.py       # 第四个样例同理
 uv run python examples/candidate-rollup/make_samples.py    # 第五个样例同理
+uv run python examples/period-diff/make_samples.py         # 第六个样例同理
 uv run rule-sheet format examples/customer-sync/规则_决策表.xlsx   # 按版式规范重排任意规则工作簿 (原地)
 uv run rule-sheet export examples/customer-sync/规则_决策表.xlsx -o /tmp/r.yaml   # Excel -> YAML 无损导出
 uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/customer-sync/rules.yaml   # 语义比对, 一致返回 0
 ```
 
-验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 7 行变更 / 10 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败; position-tags 8 行变更 / 8 条内嵌用例, 每行的 命中规则 / 标签 / 显示名 都有预期值; carry-forward 5 行变更 / 6 条内嵌用例, 两前端加载后 `Rule.outputs` 展开结果逐条相同; candidate-rollup 4 行变更 / 4 条内嵌用例, 每行的聚合文本都有预期值)。改解释器语义后必须跑全量, 不要只跑一个前端。
+验收标准: `uv run pytest` 全绿。其中 `tests/test_examples.py` 保证两种前端对样例数据输出一致 (customer-sync 5 行变更 / 8 条内嵌用例; status-machine 7 行变更 / 10 条内嵌用例, 且换成 `优先级` 策略时 T2 必须失败; position-tags 8 行变更 / 8 条内嵌用例, 每行的 命中规则 / 标签 / 显示名 都有预期值; carry-forward 5 行变更 / 6 条内嵌用例, 两前端加载后 `Rule.outputs` 展开结果逐条相同; candidate-rollup 4 行变更 / 4 条内嵌用例, 每行的聚合文本都有预期值; period-diff 6 行变更 (含 1 行追加) / 6 条内嵌用例, 每行的差异类型与明细都有预期值)。改解释器语义后必须跑全量, 不要只跑一个前端。
 
 ## 执行管线 (跨文件, 改引擎前先读)
 
@@ -65,7 +67,7 @@ uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/c
   - **字段组** (0.7, `model.FIELD_GROUP_KEY`): Excel「字段组」sheet (名称 / 列名 逗号分隔) 与 YAML `字段组: {组: [列...]}` 都进 `rs.field_groups`; 规则里写在组名下的输出格由 `expand_group_outputs` 展开 (输入名 -> `输入.列` 逐列, `清空` -> 逐列 `清空`, 留空 -> 不展开), **显式按「非空值」判** (Excel 每条规则每个输出列都在字典里, 没写的是 `-`, 按键判会把组展开的值挡掉)。引擎 / 审计 / 测试只见逐列; 导出走 `RawRule.outputs` 原文保留组写法, `yaml_to_workbook` 决策表输出列按 `则:` 原文、测试 sheet 期望列按展开后的 `rs.outputs`; `diff` 比 `field_groups`。组名与主表真实列撞名在 `engine.run` 读到数据后报错
   - 测试列名校验 (`loaders._check_test_columns`) 两边共用: 期望列 ⊆ 输出列, 输入列 ⊆ 变量 ∪ 派生 ∪ `<参照表名>.存在` ∪ `基准日期` ∪ `<主表名>.<输出列>`
   - 输入声明 (`loaders._build_inputs`) 两边共用: Excel「输入」sheet 一行一个 (名称 / 匹配 / 重复键 / 文件), YAML `输入: {名: {文件, 匹配, 重复键}}`; 主表那行「匹配」必须写 `主表` (`model.PRIMARY_WORD`, 单输入可省), 其它写键 (`k` 或 `本表列 = 主表.列`, 逗号分隔, 只能对齐到主表); 「设置」sheet / `设置:` 只认 基准日期 / 输出。旧「匹配设置」/ `匹配:` 由 `_legacy_inputs` 折算 (保留一个版本), YAML 两者都没有也走旧默认 主表 / 本月
-- **表达式求值**: `eval_expr` 把中文变量名按长度降序替换为 `_vN` (跳过引号字符串; 反引号 `` `名字` `` 整体查), `且`/`或`/`非` 换成 `and`/`or`/`not`, 然后 `ast.parse` → `expressions._Rewrite` 改写 → `compile` (按文本 `lru_cache`) → 受限 `eval`。改写把 `BoolOp`/`Not` 换成逐元素的 `_all`/`_any`/`_not`, 六个比较和 `in`/`not in` 换成「任一侧为空就不成立」的 helper, 链式比较拆段; 算术 / 函数调用不碰 (三元用函数 `如果()`, 不改写 `IfExp`)。时长字面量 `365天` 在名字替换之后、字符串之外改写成 `_days(365)`。可用函数只有 `expressions.FUNCS` 里那几个; 加内置函数就加在这个 dict, 且必须对 Series 逐行生效 (逐行的用 `_rowwise` 包, 参数里的 `空` 哨兵用 `_reject_null` 拒; 不开放 `float` / `str` / `int`, 它们对整列不是逐行的, `数字()` / `拼接()` 是替代)。`TEXT_FUNCS` 里的文本函数同时是决策表单元格的关键字 (`包含 a, b`, 走 `conditions._TEXT_TEST_RE`, 参数取原文不过 `literal`)。文本形态统一走 `expressions.text_of` (整数不带 .0, 日期 yyyy-mm-dd), 审计列的 `engine.fmt` 也用它。真值归一统一走 `expressions.truth` (NaN 算 False; `NaN.astype(bool)` 是 True, 别直接用)
+- **表达式求值**: `eval_expr` 把中文变量名按长度降序替换为 `_vN` (跳过引号字符串; 反引号 `` `名字` `` 整体查), `且`/`或`/`非` 换成 `and`/`or`/`not`, 然后 `ast.parse` → `expressions._Rewrite` 改写 → `compile` (按文本 `lru_cache`) → 受限 `eval`。输入名与字段组名本身也在 ns 里 (`InputRef` / `FieldGroupRef`, 由 `engine.add_refs` 在 `build_namespace` 与 `case_namespace` 两条路加), 给 `NsFunc` 类函数 (`差异`, eval_expr 把 ns 绑成第一个参数) 当参数; `literal` / `resolve_output` 对这两种值报错。变更判定的相等统一在 `expressions.values_equal` (`engine.same` 委托它; 空串与空值相同, 0.7), 审计列 / 用例期望 / diff / `差异()` 四处同一套。改写把 `BoolOp`/`Not` 换成逐元素的 `_all`/`_any`/`_not`, 六个比较和 `in`/`not in` 换成「任一侧为空就不成立」的 helper, 链式比较拆段; 算术 / 函数调用不碰 (三元用函数 `如果()`, 不改写 `IfExp`)。时长字面量 `365天` 在名字替换之后、字符串之外改写成 `_days(365)`。可用函数只有 `expressions.FUNCS` 里那几个; 加内置函数就加在这个 dict, 且必须对 Series 逐行生效 (逐行的用 `_rowwise` 包, 参数里的 `空` 哨兵用 `_reject_null` 拒; 不开放 `float` / `str` / `int`, 它们对整列不是逐行的, `数字()` / `拼接()` 是替代)。`TEXT_FUNCS` 里的文本函数同时是决策表单元格的关键字 (`包含 a, b`, 走 `conditions._TEXT_TEST_RE`, 参数取原文不过 `literal`)。文本形态统一走 `expressions.text_of` (整数不带 .0, 日期 yyyy-mm-dd), 审计列的 `engine.fmt` 也用它。真值归一统一走 `expressions.truth` (NaN 算 False; `NaN.astype(bool)` 是 True, 别直接用)
 - **Excel 版式契约** (`loaders._parse_header` 与两个 `make_samples.py` 必须一致): sheet 名固定为 输入 / 设置 / 变量定义 / 决策表 / 测试 (输入 与 决策表 缺失即报错, 其余可选; 旧的 匹配设置 仍认); 表头按内容定位: 写着 `规则ID` (测试 sheet: `用例`) 的第一行是列类型行 (`RULE_KINDS` / `TEST_KINDS` 白名单, 拼错报错; 标了类型的列必须有列名), 下一行是列名行, 再下一行起正文; 之前的行是元信息, 命中策略靠 `命中策略` 标签右边一格 (没有标签就认一个单独写着策略名的格, 按 `model.HIT_POLICIES` 校验); 优先级留空取 `1000 + 行序`; 相邻同 ID 行是续行 (优先级 / 输出留空或与首行相同, 否则报错; 不相邻的重复 ID 报错); 合并单元格由 `_rows` 展开成左上格的值。工作簿用 `data_only=False` 读: 以 `=` 开头的格 (如 `= 本期.类别-会议`) 会被 Excel / openpyxl 存成公式, `data_only=True` 读到 None 条件就静默变成不关心 (2026-10-19 实测); 生成脚本写这类格要 `cell.data_type = "s"`
 
 ## 核心语义约定 (改代码前先读)

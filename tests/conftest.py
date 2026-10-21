@@ -19,6 +19,9 @@ CARRY_YAML = CARRY_DIR / "rules.yaml"
 CAND_DIR = EXAMPLES / "candidate-rollup"
 CAND_EXCEL = CAND_DIR / "规则_决策表.xlsx"
 CAND_YAML = CAND_DIR / "rules.yaml"
+DIFF_DIR = EXAMPLES / "period-diff"
+DIFF_EXCEL = DIFF_DIR / "规则_决策表.xlsx"
+DIFF_YAML = DIFF_DIR / "rules.yaml"
 
 
 @pytest.fixture

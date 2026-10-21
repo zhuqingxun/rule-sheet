@@ -22,6 +22,9 @@ from .conftest import (
     CARRY_DIR,
     CARRY_EXCEL,
     CARRY_YAML,
+    DIFF_DIR,
+    DIFF_EXCEL,
+    DIFF_YAML,
     EXCEL_RULES,
     STATUS_DIR,
     STATUS_EXCEL,
@@ -40,8 +43,9 @@ SAMPLES = pytest.mark.parametrize(
         (TAGS_EXCEL, TAGS_YAML, TAGS_DIR),
         (CARRY_EXCEL, CARRY_YAML, CARRY_DIR),
         (CAND_EXCEL, CAND_YAML, CAND_DIR),
+        (DIFF_EXCEL, DIFF_YAML, DIFF_DIR),
     ],
-    ids=["customer", "status", "tags", "carry", "cand"],
+    ids=["customer", "status", "tags", "carry", "cand", "diff"],
 )
 
 

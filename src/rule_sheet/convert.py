@@ -757,11 +757,15 @@ def _structure_diff(a: RuleSet, b: RuleSet, res: DiffResult) -> None:
     ta = {_case_key(t.name): t for t in a.tests}
     tb = {_case_key(t.name): t for t in b.tests}
     keys = [_case_key(t.name) for t in a.tests] + [k for k in (_case_key(t.name) for t in b.tests) if k not in ta]
+    primary_exists = f"{a.primary.name}.{EXIST_VAR}"
     for key in keys:
         if key not in ta or key not in tb:
             res.differences.append(f"用例「{key}」只在 {'B' if key not in ta else 'A'} 里")
             continue
         ga, gb = _norm_given(ta[key].inputs), _norm_given(tb[key].inputs)
+        for g in (ga, gb):  # 主表的 .存在 没给 = 是, 写了 是 和没写是一回事
+            if str(g.get(primary_exists, "")).strip() in TRUE_WORDS:
+                g.pop(primary_exists)
         if ga != gb:
             res.differences.append(f"用例「{key}」输入不同: A {ga}, B {gb}")
         ea, eb = _norm_given(ta[key].expected), _norm_given(tb[key].expected)

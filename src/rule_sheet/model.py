@@ -56,6 +56,24 @@ class _Null:
 NULL = _Null()
 
 
+@dataclass(frozen=True)
+class InputRef:
+    """命名空间里输入名本身 (`本期`) 对应的值: 给 差异(本期, 上期, 字段组) 这类要按输入取列的函数用, 不是数据。"""
+
+    name: str
+
+
+@dataclass(frozen=True)
+class FieldGroupRef:
+    """命名空间里字段组名 (`对比字段`) 对应的值: 一组列名。"""
+
+    name: str
+    columns: tuple[str, ...]
+
+
+REF_TYPES = (InputRef, FieldGroupRef)
+
+
 @dataclass
 class Rule:
     rule_id: str

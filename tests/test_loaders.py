@@ -384,6 +384,29 @@ def test_excel_field_groups_expand_to_columns(tmp_path):
     assert res["y"].tolist() == [5, "q", None, 1]
 
 
+def test_diff_call_adds_both_inputs_columns_to_variables(tmp_path):
+    """差异(本期, 上期, 组) 引用到的 两个输入 × 组里的列 都进变量清单; 组名与派生变量重名报错。"""
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        "输入:\n  本期: {匹配: 主表}\n  上期: {匹配: k}\n  花名册: {匹配: k}\n"
+        "字段组:\n  对比: [a, b]\n变量:\n  明细: 差异(本期, 上期, 对比)\n"
+        "规则:\n  - 编号: C1\n    当: [明细 != 空]\n    则: {差异类型: CHANGED, 明细列: 明细}\n"
+        "测试:\n  - 用例: T1\n    输入: {本期.a: 1, 上期.a: 2}\n    期望: {差异类型: CHANGED, 明细列: 'a:2->1'}\n"
+        "  - 用例: T2\n    输入: {本期.a: 1, 上期.a: 1}\n    期望: {}\n",
+        encoding="utf-8",
+    )
+    rs = load_yaml_rules(p)
+    assert rs.variables == ["上期.a", "上期.b", "明细", "本期.a", "本期.b"]  # 花名册 没被引用, 不进
+    from rule_sheet.engine import run_tests
+
+    assert [(o.passed, o.hit) for o in run_tests(rs)] == [(True, "C1"), (True, "")]
+    p.write_text(
+        "输入:\n  本期: {匹配: 主表}\n字段组:\n  明细: [a]\n变量:\n  明细: 本期.a\n规则: []\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="字段组「明细」与变量定义里的派生变量重名"):
+        load_yaml_rules(p)
+
+
 def test_yaml_field_groups(tmp_path):
     p = tmp_path / "r.yaml"
     p.write_text(

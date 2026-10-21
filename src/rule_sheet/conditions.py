@@ -27,7 +27,7 @@ from .expressions import (
     truth,
     undefined_variable,
 )
-from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, NULL, NULL_WORD, Condition, Namespace
+from .model import BLANK_WORDS, CLEAR, CLEAR_WORDS, NULL, NULL_WORD, REF_TYPES, Condition, Namespace
 
 Mask = pd.Series
 
@@ -219,6 +219,8 @@ def resolve_output(spec: Any, ns: Namespace) -> Any:
             val = eval_expr(s[1:], ns)
             return CLEAR if val is NULL else val  # =空 与 清空 同义
         if s in ns:
+            if isinstance(ns[s], REF_TYPES):
+                raise ValueError(f"输出格「{s}」是输入名或字段组名, 不是值; 要复制列写 {s}.<列名>, 整组复制用字段组列")
             return ns[s]
         if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
             return s[1:-1]

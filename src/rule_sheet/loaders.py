@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -239,7 +240,9 @@ def _legacy_inputs(match: dict[str, Any]) -> tuple[list[InputSpec], dict[str, An
 # ---------------------------------------------------------------------------
 
 
-def _check_field_groups(groups: dict[str, list[str]], names: list[str], where: str) -> dict[str, list[str]]:
+def _check_field_groups(
+    groups: dict[str, list[str]], names: list[str], where: str, derived: list[str] = ()
+) -> dict[str, list[str]]:
     all_cols = {c for cols in groups.values() for c in cols}
     for name, cols in groups.items():
         if not cols:
@@ -249,12 +252,27 @@ def _check_field_groups(groups: dict[str, list[str]], names: list[str], where: s
             raise ValueError(f"{where}: 字段组「{name}」里的列「{dup[0]}」重复")
         if name in names:
             raise ValueError(f"{where}: 字段组「{name}」与输入名重复; 组名要能和输入名区分开")
+        if name in derived:
+            raise ValueError(f"{where}: 字段组「{name}」与变量定义里的派生变量重名")
         if name in all_cols:
             raise ValueError(f"{where}: 字段组名「{name}」同时是某个字段组里的列名; 组名不能是列名")
     return groups
 
 
-def _read_field_groups_sheet(ws: Any, names: list[str]) -> dict[str, list[str]]:
+_DIFF_CALL_RE = re.compile(r"差异\(\s*([^\s,()]+)\s*,\s*([^\s,()]+)\s*,\s*([^\s,()]+)\s*[,)]")
+
+
+def diff_call_variables(texts: list[str], groups: dict[str, list[str]], names: list[str]) -> set[str]:
+    """`差异(本期, 上期, 对比字段)` 引用到的列 (两个输入 × 组里的每一列) 也是变量: 用例能给值, 没给的视为空。"""
+    out: set[str] = set()
+    for t in texts:
+        for new, old, group in _DIFF_CALL_RE.findall(t):
+            if group in groups:
+                out |= {f"{n}.{c}" for n in (new, old) if n in names for c in groups[group]}
+    return out
+
+
+def _read_field_groups_sheet(ws: Any) -> dict[str, list[str]]:
     """「字段组」sheet: 第 1 行列名 (名称 / 列名 / 说明), 之后每行一个组, 「列名」格里逗号分隔。"""
     grid = _rows(ws)
     header = [_text(v) for v in grid[0]] if grid else []
@@ -272,10 +290,10 @@ def _read_field_groups_sheet(ws: Any, names: list[str]) -> dict[str, list[str]]:
         if name in groups:
             raise ValueError(f"「{FIELD_GROUP_KEY}」sheet: 字段组「{name}」重复")
         groups[name] = split_top_level(_text(_at(row, col["列名"])))
-    return _check_field_groups(groups, names, f"「{FIELD_GROUP_KEY}」sheet")
+    return groups
 
 
-def _yaml_field_groups(doc: dict[str, Any], names: list[str]) -> dict[str, list[str]]:
+def _yaml_field_groups(doc: dict[str, Any]) -> dict[str, list[str]]:
     """YAML: 字段组: {组名: [列, 列, ...]} (也认逗号分隔的一个字符串)。"""
     groups: dict[str, list[str]] = {}
     for name, cols in (doc.get(FIELD_GROUP_KEY) or {}).items():
@@ -284,7 +302,7 @@ def _yaml_field_groups(doc: dict[str, Any], names: list[str]) -> dict[str, list[
         elif not isinstance(cols, list):
             raise ValueError(f"YAML {FIELD_GROUP_KEY}: 「{name}」的值要是列名清单 ([a, b] 或 'a, b')")
         groups[str(name)] = [str(c).strip() for c in cols]
-    return _check_field_groups(groups, names, f"YAML {FIELD_GROUP_KEY}:")
+    return groups
 
 
 def expand_group_outputs(
@@ -545,7 +563,8 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
             for r in _rows(wb["变量定义"])[1:]
             if r and r[0] not in (None, "") and len(r) > 1 and r[1] not in (None, "")
         ]
-    groups = _read_field_groups_sheet(wb[FIELD_GROUP_KEY], names) if FIELD_GROUP_KEY in wb.sheetnames else {}
+    groups = _read_field_groups_sheet(wb[FIELD_GROUP_KEY]) if FIELD_GROUP_KEY in wb.sheetnames else {}
+    _check_field_groups(groups, names, f"「{FIELD_GROUP_KEY}」sheet", [k for k, _ in derived])
 
     grid = _rows(wb["决策表"])
     cols, kind_row, body_start = _parse_header(grid, "决策表", "规则ID", RULE_KINDS)
@@ -572,6 +591,7 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
     # 带输入前缀的派生变量 (报表7.现岗) 在用例里直接给值不推导, 也进变量清单 (没给的视为空)
     input_derived = [k for k, _ in derived if "." in k and k.partition(".")[0] in names]
     found = {n for t in texts for n in find_names(t, names, known)} | set(input_derived)
+    found |= diff_call_variables(texts, groups, names)
     extra = sorted(found - set(input_names))
     variables = input_names + extra  # 表头输入列 + 单元格与派生变量表达式里引用的列, 用例没给的都视为空
     output_names = expand_output_names([n for _, k, n in cols if k == "输出"], groups)
@@ -645,7 +665,8 @@ def load_yaml_rules(path: Path) -> RuleSet:
     doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     inputs, settings = _yaml_inputs(doc)
     names = [s.name for s in inputs]
-    groups = _yaml_field_groups(doc, names)
+    derived = [(str(k), str(v)) for k, v in (doc.get("变量") or {}).items()]
+    groups = _check_field_groups(_yaml_field_groups(doc), names, f"YAML {FIELD_GROUP_KEY}:", [k for k, _ in derived])
     rules: list[Rule] = []
     headers: list[str] = []
     for order, r in enumerate(doc.get("规则") or []):
@@ -667,13 +688,13 @@ def load_yaml_rules(path: Path) -> RuleSet:
             if str(col) not in headers:
                 headers.append(str(col))
     outputs = expand_output_names(headers, groups)
-    derived = [(str(k), str(v)) for k, v in (doc.get("变量") or {}).items()]
     # 扫描 当 / 则 (字段组已展开) / 变量 里引用到的 <输入名>.<列> 变量名; YAML 里新增写变量名的位置要同步加进 texts
     texts = [s for r in doc.get("规则") or [] for s in strings_in(r.get("当"))]
     texts += [str(v) for r in rules for v in r.outputs.values()]
     texts += [v for _, v in derived]
     known = [k for k, _ in derived] + list(FUNCS) + [BASE_DATE_VAR]
-    variables = sorted({n for t in texts for n in find_names(t, names, known)} | {k for k, _ in derived})
+    found = {n for t in texts for n in find_names(t, names, known)} | {k for k, _ in derived}
+    variables = sorted(found | diff_call_variables(texts, groups, names))
 
     tests: list[TestCase] = []
     allowed = _allowed_test_inputs(variables, derived, inputs, outputs)

@@ -10,13 +10,13 @@ from rule_sheet import cli
 from rule_sheet.loaders import load_rules
 from rule_sheet.style import FILLS, HEADER_FILL, ID_KINDS, KV_WIDTH_BOUNDS, WIDTH_BOUNDS, display_width, format_workbook
 
-from .conftest import CAND_EXCEL, CARRY_EXCEL, EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, YAML_RULES
+from .conftest import CAND_EXCEL, CARRY_EXCEL, DIFF_EXCEL, EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, YAML_RULES
 from .test_loaders import HEADER, RULE, TEST_HEADER, make_workbook
 
 SAMPLES = pytest.mark.parametrize(
     "path",
-    [EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, CARRY_EXCEL, CAND_EXCEL],
-    ids=["customer", "status", "tags", "carry", "cand"],
+    [EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, CARRY_EXCEL, CAND_EXCEL, DIFF_EXCEL],
+    ids=["customer", "status", "tags", "carry", "cand", "diff"],
 )
 
 

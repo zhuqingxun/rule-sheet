@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import numbers
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -13,7 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from .conditions import ns_index, resolve_output, to_mask
-from .expressions import eval_expr, is_na, text_of
+from .expressions import eval_expr, is_na, text_of, values_equal
 from .loaders import load_rules
 from .model import (
     BASE_DATE_VAR,
@@ -27,6 +26,8 @@ from .model import (
     NULL,
     NULL_WORD,
     TRUE_WORDS,
+    FieldGroupRef,
+    InputRef,
     InputSpec,
     Namespace,
     Rule,
@@ -233,7 +234,16 @@ def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[st
                 ns[f"{spec.name}.{col}"] = merged[col]
         ns[f"{spec.name}.{EXIST_VAR}"] = merged["_merge"].eq("both")
     ns[BASE_DATE_VAR] = base_date
+    add_refs(rs, ns)
     return ns
+
+
+def add_refs(rs: RuleSet, ns: Namespace) -> None:
+    """输入名与字段组名本身也进命名空间 (InputRef / FieldGroupRef), 给 差异(本期, 上期, 对比字段) 这类函数当参数用。"""
+    for s in rs.inputs:
+        ns[s.name] = InputRef(s.name)
+    for g, cols in rs.field_groups.items():
+        ns[g] = FieldGroupRef(g, tuple(cols))
 
 
 def primary_frame(rs: RuleSet, ns: Namespace, columns: list[str]) -> pd.DataFrame:
@@ -380,18 +390,13 @@ def apply_rules(
 
 
 def same(a: Any, b: Any) -> bool:
-    if is_na(a) or is_na(b):
-        return is_na(a) and is_na(b)
-    if isinstance(a, bool) or isinstance(b, bool):
-        return bool(a) == bool(b)
-    if isinstance(a, numbers.Real) and isinstance(b, numbers.Real):
-        return abs(float(a) - float(b)) < 1e-9
-    if isinstance(a, (pd.Timestamp, datetime, date)) or isinstance(b, (pd.Timestamp, datetime, date)):
-        try:
-            return pd.Timestamp(a) == pd.Timestamp(b)
-        except (TypeError, ValueError):
-            return False
-    return str(a) == str(b)
+    """变更判定 (审计列 / 用例期望 / diff 交叉验证) 的相等: 见 expressions.values_equal, 空串与空值视为相同 (0.7)。"""
+    return values_equal(a, b)
+
+
+def _tidy_nulls(s: pd.Series) -> pd.Series:
+    """输出列 (apply_rules 之后总是 object) 里的空值统一成 None, 不再 NaN / None / NaT 混用 (Python API 的 res.out)。"""
+    return pd.Series([None if is_na(v) else v for v in s.tolist()], index=s.index, dtype=object)
 
 
 def fmt(x: Any) -> str:
@@ -435,6 +440,7 @@ def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.S
     for name in rs.variables:  # 用例没提到的变量 = 空值
         if name not in ns and name not in derived_names:
             ns[name] = pd.Series([None], index=index, dtype=object)
+    add_refs(rs, ns)
     add_derived(rs, ns, index, lenient=True)
     originals = {
         col: ns.get(f"{rs.primary.name}.{col}", pd.Series([None], index=index, dtype=object)) for col in rs.outputs
@@ -592,7 +598,7 @@ def run(
                 parts.append(f"{col}: {fmt(old)} -> {fmt(new)}")
         details.append("; ".join(parts))
     for col in rs.outputs:
-        out[col] = results[col]
+        out[col] = _tidy_nulls(results[col])
     out["命中规则"] = hit_ids
     out["变更明细"] = details
     changed = out[out["变更明细"] != ""]

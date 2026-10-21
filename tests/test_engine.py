@@ -1,5 +1,7 @@
 """执行核心: 命名空间构建、命中策略合并、输出格解析、测试用例运行。"""
 
+from datetime import date
+
 import pandas as pd
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -97,8 +99,17 @@ def test_namespace_three_inputs_with_own_keys_and_same_named_columns():
 def test_namespace_single_input_needs_no_join():
     base = pd.DataFrame({"k": [1, 2], "v": ["a", "b"]})
     ns = build_namespace(make_rs([], [], inputs=inputs_of(("表", None))), {"表": base})
-    assert set(ns) == {"表.k", "表.v", "表.存在", "基准日期"}  # 主表的 .存在 总在 (没有追加时恒为 是)
+    assert set(ns) == {"表.k", "表.v", "表.存在", "表", "基准日期"}  # 主表的 .存在 总在; 输入名本身是 InputRef
     assert ns["表.存在"].tolist() == [True, True]
+
+
+def test_same_treats_blank_text_as_null():
+    """变更判定 (审计列 / 用例期望 / diff) 里空串、空白与空值相同 (issue #18 / #22); 文本仍严格比较。"""
+    from rule_sheet.engine import same
+
+    assert same("", None) and same(" ", float("nan")) and same(None, None) and same("", "  ")
+    assert not same("", "0") and not same("007", 7) and same(7.0, 7) and same("a", "a")
+    assert same(pd.Timestamp("2026-10-20"), date(2026, 10, 20))
 
 
 def test_lookup_rows_with_null_keys_never_match():

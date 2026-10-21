@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import numbers
 import operator
 import re
@@ -26,7 +27,7 @@ from typing import Any
 
 import pandas as pd
 
-from .model import FALSE_WORDS, NULL, NULL_WORD, TRUE_WORDS, Namespace
+from .model import FALSE_WORDS, NULL, NULL_WORD, REF_TYPES, TRUE_WORDS, FieldGroupRef, InputRef, Namespace
 
 # ---------------------------------------------------------------------------
 # 空值与真值
@@ -41,6 +42,28 @@ def is_na(x: Any) -> bool:
         return bool(pd.isna(x))
     except (TypeError, ValueError):
         return False
+
+
+def is_blank(x: Any) -> bool:
+    """空值或空白文本: 变更判定 (审计列 / 用例期望 / diff / 差异()) 把空串与空值视为相同 (0.7, issue #18)。"""
+    return is_na(x) or (isinstance(x, str) and not x.strip())
+
+
+def values_equal(a: Any, b: Any) -> bool:
+    """变更判定用的相等: 两边都空 (含空串) 算相同; 布尔按布尔; 数值按数值 (容差 1e-9); 日期按日期; 其余按文本严格比
+    ("007" 与 7 不同, 前导零不会被吃掉)。engine.same 就是它。"""
+    if is_blank(a) or is_blank(b):
+        return is_blank(a) and is_blank(b)
+    if isinstance(a, bool) or isinstance(b, bool):
+        return bool(a) == bool(b)
+    if isinstance(a, numbers.Real) and isinstance(b, numbers.Real):
+        return abs(float(a) - float(b)) < 1e-9
+    if isinstance(a, (pd.Timestamp, datetime, date)) or isinstance(b, (pd.Timestamp, datetime, date)):
+        try:
+            return pd.Timestamp(a) == pd.Timestamp(b)
+        except (TypeError, ValueError):
+            return False
+    return str(a) == str(b)
 
 
 def truth(x: Any) -> Any:
@@ -245,6 +268,48 @@ def _isin(x: Any, *values: Any) -> Any:
     return _in(x, values)
 
 
+class NsFunc:
+    """要看命名空间的函数: eval_expr 把 ns 绑成第一个参数。
+    参数里的输入名 / 字段组名由 ns 里的 InputRef / FieldGroupRef 传进来 (engine.add_refs)。"""
+
+    def __init__(self, fn: Callable[..., Any]) -> None:
+        self.fn = fn
+
+
+def _diff(ns: Namespace, new: Any, old: Any, group: Any, 分隔符: Any = ";") -> Any:
+    """差异(新, 旧, 字段组): 逐字段比两个输入的同名列, 变化的拼成 `字段:旧值->新值`, 多个用分隔符接; 没有变化为空。
+
+    相等判定与审计列同一套 (values_equal: 空串与空值相同, 文本严格, 数值按数值, 日期按日期);
+    空值显示为空串 (`绩效:->C`, issue #18 对方的要求), 审计列仍显示 空。
+    """
+    if not isinstance(new, InputRef) or not isinstance(old, InputRef):
+        raise ValueError("差异(新, 旧, 字段组) 的前两个参数要写输入名, 如 差异(本期, 上期, 对比字段)")
+    if not isinstance(group, FieldGroupRef):
+        raise ValueError("差异(新, 旧, 字段组) 的第三个参数要写字段组名 (在「字段组」sheet / 字段组: 里定义)")
+    _reject_null("差异", 分隔符)
+    sep = str(分隔符)
+    cols = group.columns
+    olds: list[Any] = []
+    news: list[Any] = []
+    for c in cols:
+        for ref, bucket in ((old, olds), (new, news)):
+            key = f"{ref.name}.{c}"
+            if key not in ns:
+                raise KeyError(f"差异(): 字段组「{group.name}」里的列「{c}」在输入「{ref.name}」里不存在")
+            bucket.append(ns[key])
+
+    def one(*vals: Any) -> str | None:
+        k = len(cols)
+        parts = [
+            f"{c}:{'' if is_blank(o) else text_of(o)}->{'' if is_blank(n) else text_of(n)}"
+            for c, o, n in zip(cols, vals[:k], vals[k:], strict=True)
+            if not values_equal(o, n)
+        ]
+        return sep.join(parts) if parts else None
+
+    return _rowwise(one, *olds, *news)
+
+
 # 决策表单元格也认这几个关键字: `包含 终端, 法务` = 包含(列, "终端", "法务")
 TEXT_FUNCS: dict[str, Callable[..., Any]] = {
     "包含": _text_test("包含", lambda v, n: n in v),
@@ -270,6 +335,7 @@ FUNCS: dict[str, Any] = {
     "数字": _number,
     "日期": _to_date,
     "如果": _if,
+    "差异": NsFunc(_diff),
     "是": True,
     "否": False,
     "true": True,
@@ -458,7 +524,7 @@ def eval_expr(expr: str, ns: Namespace) -> Any:
     """求值表达式: 名字替换 (substitute_names) 后交给受限 eval。"""
     text, used = substitute_names(expr, ns)
     local: dict[str, Any] = {ident: ns[name] for ident, name in used.items()}
-    local.update(FUNCS)
+    local.update({k: functools.partial(v.fn, ns) if isinstance(v, NsFunc) else v for k, v in FUNCS.items()})
     local.update(_HELPERS)
     local[NULL_WORD] = NULL
     try:
@@ -570,6 +636,8 @@ def literal(token: str, ns: Namespace, var: pd.Series | None = None) -> Any:
     if t == NULL_WORD:
         return NULL
     if t in ns:
+        if isinstance(ns[t], REF_TYPES):  # 输入名 / 字段组名本身不是值
+            raise ValueError(f"「{t}」是输入名或字段组名, 不能当值比较; 要引用列写 {t}.<列名>")
         return ns[t]
     if var is not None and var.dtype == bool:
         if t in TRUE_WORDS:

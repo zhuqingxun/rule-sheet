@@ -165,6 +165,42 @@ def test_concat_treats_null_as_empty_and_all_null_as_null(ns_text):
         eval_expr("拼接(本期.工号, 空)", ns_text)
 
 
+def test_diff_compares_a_field_group_across_two_inputs():
+    """差异(新, 旧, 字段组) (issue #18): 逐字段比同名列, 变化的拼成 字段:旧->新 用 ; 接; 没变化为空;
+    空串与空值相同, 空值显示为空串; 文本严格 (007 vs 7 算变化); 输入名 / 字段组名以 InputRef / FieldGroupRef 进 ns。"""
+    from rule_sheet.model import FieldGroupRef, InputRef
+
+    idx = pd.RangeIndex(4)
+    ns = {
+        "本期.职级": pd.Series(["22级", "20级", None, "007"], index=idx, dtype=object),
+        "上期.职级": pd.Series(["21级", "20级", "", 7], index=idx, dtype=object),
+        "本期.拟任人": pd.Series([None, "王五", "张三", "x"], index=idx, dtype=object),
+        "上期.拟任人": pd.Series(["李四", None, "张三", "x"], index=idx, dtype=object),
+        "本期.绩效": pd.Series(["B", "A", "A", 1.0], index=idx, dtype=object),
+        "上期.绩效": pd.Series(["A", "A", "A", 1], index=idx, dtype=object),
+        "本期": InputRef("本期"),
+        "上期": InputRef("上期"),
+        "对比字段": FieldGroupRef("对比字段", ("职级", "拟任人", "绩效")),
+    }
+    out = eval_expr("差异(本期, 上期, 对比字段)", ns)
+    assert out.tolist()[:2] == ["职级:21级->22级;拟任人:李四->;绩效:A->B", "拟任人:->王五"]
+    assert pd.isna(out.iloc[2])  # 职级 空串 vs 空值相同, 其余相同
+    assert out.iloc[3] == "职级:7->007"  # 文本严格; 绩效 1.0 vs 1 按数值相同
+    assert eval_expr('差异(本期, 上期, 对比字段, 分隔符="|")', ns).iloc[0] == "职级:21级->22级|拟任人:李四->|绩效:A->B"
+    assert eval_expr("差异(本期, 上期, 对比字段) != 空", ns).tolist() == [True, True, False, True]
+    with pytest.raises(ValueError, match="前两个参数要写输入名"):
+        eval_expr("差异(本期.职级, 上期, 对比字段)", ns)
+    with pytest.raises(ValueError, match="第三个参数要写字段组名"):
+        eval_expr("差异(本期, 上期, 本期.职级)", ns)
+    ns["对比字段"] = FieldGroupRef("对比字段", ("职级", "部门"))
+    with pytest.raises(ValueError, match="字段组「对比字段」里的列「部门」在输入「上期」里不存在"):
+        eval_expr("差异(本期, 上期, 对比字段)", ns)
+    with pytest.raises(ValueError, match="「本期」是输入名或字段组名, 不能当值比较"):
+        from rule_sheet.expressions import literal
+
+        literal("本期", ns)
+
+
 def test_if_is_vectorized_and_null_goes_to_else(ns_text):
     out = eval_expr('如果(本期.一层组织 != 空, 拼接(本期.一层组织, "/", 本期.岗位名称), 本期.岗位名称)', ns_text)
     assert out.tolist() == ["1-集团/集团CEO", "2-终端/终端BG-总裁助理", "3-华东/", "法务部", "11-控制/7"]

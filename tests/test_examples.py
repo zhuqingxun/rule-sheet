@@ -14,6 +14,8 @@ from .conftest import (
     CARRY_DIR,
     CARRY_EXCEL,
     CARRY_YAML,
+    DIFF_EXCEL,
+    DIFF_YAML,
     EXCEL_RULES,
     STATUS_DIR,
     STATUS_EXCEL,
@@ -28,6 +30,7 @@ STATUS_FRONTENDS = pytest.mark.parametrize("rules_file", [STATUS_EXCEL, STATUS_Y
 TAGS_FRONTENDS = pytest.mark.parametrize("rules_file", [TAGS_EXCEL, TAGS_YAML], ids=["excel", "yaml"])
 CARRY_FRONTENDS = pytest.mark.parametrize("rules_file", [CARRY_EXCEL, CARRY_YAML], ids=["excel", "yaml"])
 CAND_FRONTENDS = pytest.mark.parametrize("rules_file", [CAND_EXCEL, CAND_YAML], ids=["excel", "yaml"])
+DIFF_FRONTENDS = pytest.mark.parametrize("rules_file", [DIFF_EXCEL, DIFF_YAML], ids=["excel", "yaml"])
 
 EXPECTED_HITS = {
     "C001": "R1",
@@ -362,6 +365,67 @@ def test_cand_frontends_agree(tmp_path):
     a = run(CAND_EXCEL, output=tmp_path / "a.xlsx").out
     b = run(CAND_YAML, output=tmp_path / "b.xlsx").out
     cols = ["岗位编码", *CAND_OUTPUTS, "命中规则", "变更明细"]
+    pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
+
+
+# ---------------------------------------------------------------------------
+# 第六个样例 period-diff: 差异(本期, 上期, 字段组) + 独有行 追加 (04-diff: ADDED / CHANGED / UNCHANGED / REMOVED)
+# ---------------------------------------------------------------------------
+
+DIFF_EXPECTED = {  # 岗位编码 -> (命中规则, 差异类型, 变更字段明细)
+    "Q1": ("D3", "CHANGED", "岗位职级:21级->22级;绩效:A->B"),
+    "Q2": ("D3", "CHANGED", "拟任人:李四->"),  # 新值为空显示为空串
+    "Q3": ("D2", "ADDED", None),
+    "Q4": ("D4", "UNCHANGED", None),
+    "Q5": ("D3", "CHANGED", "一层组织:3-研发体系->3-研发"),
+    "Q6": ("D1", "REMOVED", None),  # 上期独有, 追加在末尾
+}
+
+
+@DIFF_FRONTENDS
+def test_diff_sample_loads_and_cases_pass(rules_file):
+    rs = load_rules(rules_file)
+    assert rs.lookups[0].append is True and rs.field_groups == {
+        "对比字段": ["岗位名称", "岗位职级", "一层组织", "拟任人", "绩效"]
+    }
+    assert rs.derived == [("变更明细", "差异(本期, 上期, 对比字段)")] and rs.outputs == ["差异类型", "变更字段明细"]
+    # 差异() 引用到的两期各五列都是变量 (用例能给值, 没给为空); 主表 .存在 不靠扫描也能在用例里给
+    assert {f"{p}.{c}" for p in ("本期", "上期") for c in rs.field_groups["对比字段"]} <= set(rs.variables)
+    outcomes = run_tests(rs)
+    assert len(outcomes) == 6
+    assert all(o.passed for o in outcomes), [(o.name, o.problems, o.error) for o in outcomes if not o.passed]
+
+
+@DIFF_FRONTENDS
+def test_diff_sample_real_data_appends_removed_rows(rules_file, tmp_path):
+    res = run(rules_file, output=tmp_path / "out.xlsx")
+    assert not res.stopped_by_tests and res.out is not None
+    assert res.out["岗位编码"].tolist() == ["Q1", "Q2", "Q3", "Q4", "Q5", "Q6"]  # Q6 追加在末尾
+    assert any("输入「上期」有 1 行主表没有的键, 按「追加」接在末尾" in n for n in res.notes)
+    row = res.out.set_index("岗位编码")
+    for code, (hit, kind, detail) in DIFF_EXPECTED.items():
+        assert (row.loc[code, "命中规则"], row.loc[code, "差异类型"], row.loc[code, "变更字段明细"]) == (
+            hit,
+            kind,
+            detail,
+        ), code
+    assert row.loc["Q6", ["岗位名称", "岗位职级", "一层组织", "拟任人", "绩效"]].tolist() == [
+        "采购部-经理",
+        "20级",
+        "4-供应链",
+        "周七",
+        "B",
+    ]
+    assert len(res.changed) == 6
+    assert row.loc["Q3", "变更字段明细"] is None  # res.out 里输出列的空值统一是 None (issue #22 的清理项)
+    back = pd.read_excel(res.written).set_index("岗位编码")
+    assert len(back) == 6 and back.loc["Q6", "差异类型"] == "REMOVED" and back.loc["Q6", "拟任人"] == "周七"
+
+
+def test_diff_sample_frontends_agree(tmp_path):
+    a = run(DIFF_EXCEL, output=tmp_path / "a.xlsx").out
+    b = run(DIFF_YAML, output=tmp_path / "b.xlsx").out
+    cols = ["岗位编码", "岗位名称", "差异类型", "变更字段明细", "命中规则", "变更明细"]
     pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
 
 
