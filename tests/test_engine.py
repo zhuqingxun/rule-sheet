@@ -2,10 +2,19 @@
 
 import pandas as pd
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from rule_sheet.conditions import cell_condition, expr_condition
-from rule_sheet.engine import add_derived, apply_rules, build_namespace, read_table, run_tests, split_sheet
+from rule_sheet.engine import (
+    _is_date_column,
+    add_derived,
+    apply_rules,
+    build_namespace,
+    read_table,
+    run_tests,
+    split_sheet,
+    write_xlsx_safely,
+)
 from rule_sheet.model import InputSpec, Rule, RuleSet, TestCase
 
 # ---------------------------------------------------------------------------
@@ -350,3 +359,24 @@ def test_run_tests_expected_cleared():
     assert [o.passed for o in outcomes] == [True, True, False, False]
     assert outcomes[2].problems == ["备注: 期望 旧, 实际 空"]
     assert outcomes[3].problems == ["备注: 期望 空, 实际 旧"]
+
+
+def test_date_columns_written_with_date_format(tmp_path):
+    """规则写过之后变成 object 的日期列也按 yyyy-mm-dd 写出; 混着文本的列和全空列走原来的路径 (不当日期列)。"""
+    idx = pd.RangeIndex(3)
+    df = pd.DataFrame(
+        {
+            "全日期": pd.Series(
+                [pd.Timestamp("2026-10-20"), None, pd.Timestamp("2026-09-20")], index=idx, dtype=object
+            ),
+            "混合": pd.Series([pd.Timestamp("2026-10-20"), "待定", None], index=idx, dtype=object),
+            "全空": pd.Series([None, None, None], index=idx, dtype=object),
+            "原生": pd.to_datetime(pd.Series(["2026-10-20", None, "2026-09-20"], index=idx)),
+        }
+    )
+    assert [_is_date_column(df[c]) for c in df.columns] == [True, False, False, True]
+    out = write_xlsx_safely(df, tmp_path / "o.xlsx")
+    ws = load_workbook(out)["Sheet1"]
+    formats = {ws.cell(1, c).value: ws.cell(2, c).number_format for c in range(1, 5)}
+    assert formats["全日期"] == "yyyy-mm-dd" and formats["原生"] == "yyyy-mm-dd"
+    assert formats["混合"] != "yyyy-mm-dd" and formats["全空"] != "yyyy-mm-dd"

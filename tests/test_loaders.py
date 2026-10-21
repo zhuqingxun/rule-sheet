@@ -428,6 +428,28 @@ def test_field_group_errors(tmp_path, groups, header, decision, msg):
         load_rules(make_workbook(tmp_path / "r.xlsx", decision, groups=groups, groups_header=header))
 
 
+def test_field_group_copy_is_fine_under_join_policy(tmp_path):
+    """多条拼接 只拦 清空; 字段组写输入名展开成的 上期.x 逐列参与拼接, 和手写六列一样。"""
+    decision = [["命中策略", "多条拼接"], *GROUP_DECISION[:2], ["R1", "x", "本月", "-"], ["R2", "x", "-", "附加"]]
+    rs = load_rules(
+        make_workbook(tmp_path / "r.xlsx", decision, groups=[["带入", "x, y"]], settings=[["拼接分隔符", ";"]])
+    )
+    assert rs.hit_policy == "多条拼接" and [r.outputs for r in rs.rules] == [
+        {"x": "本月.x", "y": "本月.y"},
+        {"y": "附加"},
+    ]
+    from rule_sheet.engine import apply_rules
+
+    idx = pd.RangeIndex(1)
+    ns = {
+        "主表.a": pd.Series(["x"], index=idx, dtype=object),
+        "本月.x": pd.Series([1], index=idx),
+        "本月.y": pd.Series(["b"], index=idx),
+    }
+    res, hits = apply_rules(rs, ns, {c: pd.Series([None], index=idx, dtype=object) for c in rs.outputs})
+    assert hits.tolist() == ["R1; R2"] and res["x"].tolist() == ["1"] and res["y"].tolist() == ["b;附加"]
+
+
 # ---------------------------------------------------------------------------
 # 输入声明: 规则文件是形参 (名字 + 怎么对齐到主表), 文件只是可选的默认绑定
 # ---------------------------------------------------------------------------
