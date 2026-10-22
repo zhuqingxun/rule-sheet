@@ -314,6 +314,29 @@ def test_priority_merges_per_output_column(ns_two_rows):
     assert hit.tolist() == ["R1; R2", "", ""]
 
 
+def test_priority_lets_independent_output_columns_hit_separately():
+    """issue #27: 两组互不相干的规则各管一列 (两条定 岗位类型, 一条定 类别) 放一张表, 优先级 下每列各自取
+    第一条写了该列的规则; 写 `-` 的规则对该列不参与也不拦截, 输出列在主表里不存在 (originals 没有) 也一样。
+    首次命中 是整行的, 作对照: 类别 永远拿不到 R6。"""
+    idx = pd.RangeIndex(3)
+    ns = {
+        "主表.层级": pd.Series(["总监", "经理", "经理"], index=idx, dtype=object),
+        "主表.空岗": pd.Series(["Y", "Y", "N"], index=idx, dtype=object),
+    }
+    r1 = Rule("R1", 1, [cell_condition("主表.层级", "总监")], {"岗位类型": "直管", "类别": "-"})
+    r2 = Rule("R2", 2, [cell_condition("主表.层级", "!= 总监")], {"岗位类型": "非直管", "类别": "-"})
+    r6 = Rule("R6", 6, [cell_condition("主表.空岗", "Y")], {"岗位类型": "-", "类别": "冒泡-空岗"})
+    outputs = ["岗位类型", "类别"]
+    res, hit = apply_rules(make_rs([r1, r2, r6], outputs), ns, {})
+    assert res["岗位类型"].tolist() == ["直管", "非直管", "非直管"]
+    assert res["类别"].tolist() == ["冒泡-空岗", "冒泡-空岗", None]
+    assert hit.tolist() == ["R1; R6", "R2; R6", "R2"]
+    res, hit = apply_rules(make_rs([r1, r2, r6], outputs, hit_policy="首次命中"), ns, {})
+    assert res["岗位类型"].tolist() == ["直管", "非直管", "非直管"]
+    assert res["类别"].tolist() == [None, None, None]
+    assert hit.tolist() == ["R1", "R2", "R2"]
+
+
 def test_output_kinds(ns_two_rows):
     r = Rule(
         "R",
