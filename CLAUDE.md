@@ -96,7 +96,7 @@ uv run rule-sheet diff   examples/customer-sync/规则_决策表.xlsx examples/c
 - 中文 DSL 关键词是产品的一部分, 改名需同步 README 速查表、样例文件、`tests/test_unary.py`; 加内置函数要同步各样例「变量定义」sheet 的「可用函数」提示行并重新生成 xlsx (carry-forward 没有变量定义 sheet)
 - issue #17–#22 的统一框架 (规则层逐行不动, 跨行进匹配层, 跨列用字段组) 与各条拟采用的写法在 issue 评论里; 0.7 做完 #21, 其余等消费方回复追问后按 #17 → #19 → #18 → #20 → #22 推进, 落地时在 `docs/设计架构.md` 5.13 补记
 - 样例数据的每一行对应一种规则情形 (见 README「样例数据设计」), 加规则时同步加数据行、Excel 测试 sheet 用例、YAML 测试用例, 并重新生成 xlsx
-- 版式只在 `style.py` 一处定义 (`FILLS` / `WIDTH_BOUNDS` / `KV_WIDTH_BOUNDS` 等), 生成脚本里不写颜色和列宽; 改规范要同步 `docs/使用指南.md` 3.6 的表并重新生成全部样例 (`tests/test_style.py` 对照常量校验样例)
+- 版式只在 `style.py` 一处定义 (`FILLS` / `WIDTH_BOUNDS` / `KV_WIDTH_BOUNDS` / `SHEET_ORDER` / `SECTION_FILL` 等), 生成脚本里不写颜色和列宽; `style_rules_workbook` 先按 `SHEET_ORDER` 重排 sheet (只选中第一张, 否则 Excel 打开是组合工作表), 说明格用 `_span_note` 合并到表宽 (右边有字不合并; 合并区的从属格读回来没有底色, 测试查左上格 + 合并区); 合并只做在设置项 / 元信息行, 加载器 `_rows` 展开后仍只取「第一个有字格 + 右邻」; 改规范要同步 `docs/使用指南.md` 3.6 的表并重新生成全部样例 (`tests/test_style.py` 对照常量校验样例)
 - 生成的 xlsx 进 git (体积小, 便于直接打开看), `examples/*/output/` 不进
 - 版本号在 `pyproject.toml` 与 `src/rule_sheet/__init__.py` 两处, 同步改
 - `examples/**` 被 ruff format 排除并忽略 E501: `make_samples.py` 里的规则表是手工按列对齐的, 不要去「修」它的格式
