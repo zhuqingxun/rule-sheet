@@ -5,13 +5,16 @@
 - 表头加粗; 表区域细灰边框; 垂直居中; 输入 与 ID 类列水平居中, 输出 / 说明 左对齐
 - 列宽按内容算 (中文算 2 个字符宽), 每类列有上下限; 超过上限的格换行, 行高按行数估算后显式写入
 - 冻结: 决策表 / 测试 冻结到列名行之下、最左边连续 ID 类列之右; 「设置」冻结到输入表列名之下; 其它 sheet 冻结首行
-- 元信息行 (决策表的 命中策略 / 拼接分隔符, 「设置」的设置项): 标签加粗, 说明浅黄且不参与定宽
+- 元信息行 (决策表的 命中策略 / 拼接分隔符, 「设置」的设置项): 标签加粗, 值不上色, 说明浅黄、合并到表宽换行
+- 「设置」的分段标题行 (设置项 / 输入表): 深蓝底白字横跨表宽
+- sheet 顺序固定: 设置 / 变量定义 / 字段组 / 决策表 / 测试, 不认识的排最后
 - 以 = 开头的格按文本存 (否则 Excel 当成公式, 显示 #NAME?); 日期格 yyyy-mm-dd
 表头在哪一行由 loaders 的同一套逻辑判断, 所以 format 与加载器对「哪里是表头」永远一个答案。
 """
 
 from __future__ import annotations
 
+import contextlib
 import math
 import unicodedata
 from datetime import date, datetime
@@ -24,7 +27,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .loaders import POLICY_LABEL, RULE_KINDS, TEST_KINDS, _parse_header, _rows, input_header_row, load_rules
-from .model import JOIN_SEP_KEY, SETTINGS_SHEET
+from .model import FIELD_GROUP_KEY, JOIN_SEP_KEY, LEGACY_INPUTS_SHEET, SETTING_KEYS, SETTINGS_SHEET
 
 # ---------------------------------------------------------------------------
 # 规范常量
@@ -80,6 +83,14 @@ WIDE_CHAR = 2.2
 LINE_HEIGHT = 15.0  # Excel 默认行高 (磅), 换行格的行高 = 行数 * 它
 DATE_FORMAT = "yyyy-mm-dd"
 KV_SHEETS = ("输入", "设置", "变量定义", "字段组", "匹配设置")
+# sheet 的固定顺序 (format 时重排): 先「设置」(输入从哪来), 再 变量定义 / 字段组 (规则里用到的名字), 再决策表与测试;
+# 旧的 输入 / 匹配设置 紧跟「设置」; 不认识的 sheet 排在最后, 相互顺序不变
+SHEET_ORDER = (SETTINGS_SHEET, LEGACY_INPUTS_SHEET, "匹配设置", "变量定义", FIELD_GROUP_KEY, "决策表", "测试")
+# 「设置」里 设置项 / 输入表 两块的分段标题行: 深蓝底白字, 横跨整张表, 说明合并到表宽并换行 (不能溢出到色带外: 白字白底)
+SECTION_FILL = "305496"
+SECTION_LABEL_FONT = Font(bold=True, color="FFFFFF")
+SECTION_NOTE_FONT = Font(bold=False, color="FFFFFF")
+SECTION_MIN_HEIGHT = 20.0
 # 「设置」sheet 两块内容上方的标题行: B 列留空, 加载器按「值为空」跳过 (设置项 这个词也被显式跳过);
 # 样例生成脚本与 YAML -> Excel 共用
 SETTINGS_TITLE = (
@@ -205,6 +216,38 @@ def _last_row(ws: Worksheet) -> int:
     return 0
 
 
+def _meta_label(value: Any) -> bool:
+    """决策表元信息行的标签格 (命中策略 / 拼接分隔符, 可带冒号)。"""
+    return str(value or "").strip().rstrip(":：") in (POLICY_LABEL, JOIN_SEP_KEY)
+
+
+def _span_note(ws: Worksheet, row: int, start: int, end: int) -> int:
+    """把一行的说明格从 start 合并到 end (表的右边界), 换行显示, 不再溢出到表外。返回说明实际占到的列。
+
+    右边还有别的字就不合并 (合并会把它们清掉), 只在 start 一格里换行; 已有的合并先拆开再按现在的表宽合并 (format 幂等)。
+    """
+    for rng in list(ws.merged_cells.ranges):
+        if rng.min_row <= row <= rng.max_row and rng.max_col >= start and rng.min_col <= max(start, end):
+            if (rng.min_row, rng.max_row, rng.min_col, rng.max_col) == (row, row, start, end):
+                return end
+            ws.unmerge_cells(str(rng))
+    if end <= start or any(ws.cell(row=row, column=c).value not in (None, "") for c in range(start + 1, end + 1)):
+        return start
+    ws.merge_cells(start_row=row, start_column=start, end_row=row, end_column=end)
+    return end
+
+
+def _fit_note_height(ws: Worksheet, row: int, start: int, end: int, min_height: float | None = None) -> None:
+    """合并后的说明按合并区的总宽估行数定行高 (列宽定完之后再调)。"""
+    width = sum(ws.column_dimensions[get_column_letter(c)].width or 8.43 for c in range(start, end + 1))
+    width += 0.6 * (end - start)  # 合并区还含列间的网格线 (每条约 0.6 个列宽单位, Excel 实测)
+    lines = _lines_needed(ws.cell(row=row, column=start).value, int(width))
+    height = LINE_HEIGHT * lines + 2 if lines > 1 else None
+    if min_height is not None:
+        height = max(height or 0, min_height)
+    ws.row_dimensions[row].height = height
+
+
 # ---------------------------------------------------------------------------
 # 各类 sheet
 # ---------------------------------------------------------------------------
@@ -220,13 +263,22 @@ def style_rule_table(ws: Worksheet, key_kind: str, allowed: tuple[str, ...]) -> 
     body = range(body_start + 1, last + 1)
     ncols = max(kind_by_col)
 
-    for r in range(1, kind_row + 1):  # 元信息行: 标签加粗, 其余有字的格当说明 (不参与定宽, 让文字溢出到右边的空格)
-        for c in range(1, ncols + 1):
+    notes: dict[int, tuple[int, int]] = {}  # 元信息行 -> 说明合并区 (起, 止)
+    for r in range(1, kind_row + 1):  # 元信息行: 标签加粗, 紧挨着的值不上色, 再往右是说明 (浅黄, 合并到表宽换行)
+        filled = [c for c in range(1, ncols + 1) if ws.cell(row=r, column=c).value not in (None, "")]
+        label = next((c for c in filled if _meta_label(ws.cell(row=r, column=c).value)), None)
+        for c in filled:
             cell = ws.cell(row=r, column=c)
-            if cell.value in (None, ""):
-                continue
-            label = str(cell.value).strip().rstrip(":：") in (POLICY_LABEL, JOIN_SEP_KEY) or c == 1
-            _style_cell(cell, bold=label, color=None if label else FILLS[NOTE])
+            if c == label or (label is None and c == 1):
+                _style_cell(cell, bold=True)
+            elif label is not None and c == label + 1:
+                _style_cell(cell, bold=False)
+            else:
+                _style_cell(cell, bold=False, color=FILLS[NOTE])
+        rest = [c for c in filled if label is not None and c > label + 1]
+        if rest:  # 只动有 命中策略 / 拼接分隔符 标签的行; 单独写一格策略名的旧写法不碰
+            notes[r] = (rest[0], _span_note(ws, r, rest[0], ncols))
+            ws.cell(row=r, column=rest[0]).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
     for r in header_rows:
         for c in range(1, ncols + 1):
             kind = kind_by_col.get(c)
@@ -241,13 +293,15 @@ def style_rule_table(ws: Worksheet, key_kind: str, allowed: tuple[str, ...]) -> 
 
     columns = {c: WIDTH_BOUNDS.get(kind_by_col.get(c, ""), DEFAULT_BOUNDS) for c in range(1, ncols + 1)}
     _set_widths_and_wrap(ws, columns, range(header_rows[0], last + 1), wrap_rows=body)
-    for r in range(1, kind_row + 1):  # 元信息行的标签 (命中策略 / 拼接分隔符) 和紧挨着的值要显示全, 说明照旧溢出
+    for r in range(1, kind_row + 1):  # 元信息行的标签 (命中策略 / 拼接分隔符) 和紧挨着的值要显示全
         for c in range(1, ncols + 1):
-            text = str(ws.cell(row=r, column=c).value or "").strip().rstrip(":：")
-            if text in (POLICY_LABEL, JOIN_SEP_KEY):
-                _widen(ws, c, text, columns[c])
+            value = ws.cell(row=r, column=c).value
+            if _meta_label(value):
+                _widen(ws, c, str(value).strip(), columns[c])
                 if c + 1 in columns:
                     _widen(ws, c + 1, ws.cell(row=r, column=c + 1).value, columns[c + 1])
+    for r, (start, end) in notes.items():
+        _fit_note_height(ws, r, start, end)
     frozen = 0
     for c in range(1, ncols + 1):  # 最左边连续的 ID 类列冻结住
         if kind_by_col.get(c) in ID_KINDS:
@@ -288,19 +342,43 @@ def style_settings_sheet(ws: Worksheet) -> None:
     if header is None:
         style_kv_sheet(ws)
         return
+    ncols = max((i + 1 for i, h in enumerate(grid[header]) if cell_text(h).strip()), default=3)
+    items: list[int] = []  # 设置项行的设置项所在列, 放宽用
+    notes: dict[int, tuple[int, int, float | None]] = {}  # 行 -> 说明合并区 (起, 止, 最小行高)
     for r in range(1, header + 1):  # 与 loaders.read_setting_rows 同一读法: 第一个有字的格是设置项, 紧挨着的是值
-        cells = [c for c in range(1, len(grid[r - 1]) + 1) if ws.cell(row=r, column=c).value not in (None, "")]
-        for c in cells:
-            cell = ws.cell(row=r, column=c)
-            _style_cell(cell, bold=(c == cells[0]), color=FILLS[NOTE] if c > cells[0] + 1 else None)
-            _fix_value_format(cell)
+        cells = [c for c in range(1, ws.max_column + 1) if ws.cell(row=r, column=c).value not in (None, "")]
+        if not cells:
+            continue
+        j, end = cells[0], max(ncols, cells[-1])
+        label = cell_text(ws.cell(row=r, column=j).value).strip().rstrip(":：")
+        # 值为空又不是设置项 (输出 留空 = 取默认值, 仍是设置项) 的行加载器会跳过: 当分段标题, 深蓝底白字横跨表宽
+        title = ws.cell(row=r, column=j + 1).value in (None, "") and label not in SETTING_KEYS
+        if title:
+            for c in range(1, end + 1):
+                cell = ws.cell(row=r, column=c)
+                _style_cell(cell, color=SECTION_FILL)
+                with contextlib.suppress(AttributeError):
+                    cell.font = SECTION_LABEL_FONT if c == j else SECTION_NOTE_FONT
+        else:
+            items.append(r)
+            for c in cells:
+                cell = ws.cell(row=r, column=c)
+                _style_cell(cell, bold=(c == j), color=FILLS[NOTE] if c > j + 1 else None)
+                _fix_value_format(cell)
+        rest = [c for c in cells if c > j + 1]
+        if rest:
+            notes[r] = (rest[0], _span_note(ws, r, rest[0], end), SECTION_MIN_HEIGHT if title else None)
+            ws.cell(row=r, column=rest[0]).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        elif title:
+            notes[r] = (j, j, SECTION_MIN_HEIGHT)
     style_kv_sheet(ws, header_row=header + 1)
     # 设置项与值要显示全 (右边有说明挡着, 不能溢出): 在输入表算出的宽度上按它们放宽, 区间取 设置项 / 值 的
-    for r in range(1, header + 1):
-        cells = [c for c in range(1, len(grid[r - 1]) + 1) if ws.cell(row=r, column=c).value not in (None, "")]
-        if cells:
-            _widen(ws, cells[0], ws.cell(row=r, column=cells[0]).value, KV_WIDTH_BOUNDS["设置项"])
-            _widen(ws, cells[0] + 1, ws.cell(row=r, column=cells[0] + 1).value, KV_WIDTH_BOUNDS["值"])
+    for r in items:
+        j = next(c for c in range(1, ws.max_column + 1) if ws.cell(row=r, column=c).value not in (None, ""))
+        _widen(ws, j, ws.cell(row=r, column=j).value, KV_WIDTH_BOUNDS["设置项"])
+        _widen(ws, j + 1, ws.cell(row=r, column=j + 1).value, KV_WIDTH_BOUNDS["值"])
+    for r, (start, end, min_height) in notes.items():  # 列宽定完再按合并区总宽估行高
+        _fit_note_height(ws, r, start, end, min_height)
 
 
 def style_data_sheet(ws: Worksheet, *, text_cols: tuple[int, ...] = ()) -> None:
@@ -323,8 +401,20 @@ def style_data_sheet(ws: Worksheet, *, text_cols: tuple[int, ...] = ()) -> None:
     ws.freeze_panes = "A2"
 
 
+def order_sheets(wb: Workbook) -> None:
+    """按 SHEET_ORDER 重排 sheet, 不认识的排最后 (相互顺序不变); 打开时停在第一张, 且只选中它
+    (move_sheet 不动选中状态, 留着多张 tabSelected, Excel 打开就是「组合工作表」, 一改改多张)。"""
+    rank = {name: i for i, name in enumerate(SHEET_ORDER)}
+    for i, name in enumerate(sorted(wb.sheetnames, key=lambda n: rank.get(n, len(rank)))):
+        wb.move_sheet(wb[name], i - wb.sheetnames.index(name))
+    wb.active = 0
+    for i, name in enumerate(wb.sheetnames):
+        wb[name].sheet_view.tabSelected = i == 0
+
+
 def style_rules_workbook(wb: Workbook) -> None:
-    """按 sheet 名套用版式; 不认识的 sheet 不动。"""
+    """按 sheet 名套用版式并按固定顺序重排; 不认识的 sheet 只挪到最后, 内容不动。"""
+    order_sheets(wb)
     for ws in wb.worksheets:
         if ws.title == "决策表":
             style_rule_table(ws, "规则ID", RULE_KINDS)

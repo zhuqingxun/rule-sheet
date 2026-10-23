@@ -8,7 +8,19 @@ from openpyxl.utils import get_column_letter
 
 from rule_sheet import cli
 from rule_sheet.loaders import _rows, input_header_row, load_rules
-from rule_sheet.style import FILLS, HEADER_FILL, ID_KINDS, KV_WIDTH_BOUNDS, WIDTH_BOUNDS, display_width, format_workbook
+from rule_sheet.style import (
+    FILLS,
+    HEADER_FILL,
+    ID_KINDS,
+    INPUTS_TITLE,
+    KV_WIDTH_BOUNDS,
+    SECTION_FILL,
+    SETTINGS_TITLE,
+    SHEET_ORDER,
+    WIDTH_BOUNDS,
+    display_width,
+    format_workbook,
+)
 
 from .conftest import CAND_EXCEL, CARRY_EXCEL, DIFF_EXCEL, EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, YAML_RULES
 from .test_loaders import HEADER, RULE, TEST_HEADER, make_workbook
@@ -30,6 +42,10 @@ def width(ws, col):
 
 def header_row(ws, key):
     return next(r for r in range(1, 6) if ws.cell(r, 1).value == key)
+
+
+def last_kv_col(ws, head):
+    return max(c for c in range(1, ws.max_column + 1) if ws.cell(head, c).value)
 
 
 def test_display_width_counts_wide_chars_by_excel_measure():
@@ -64,11 +80,23 @@ def test_sample_workbooks_follow_the_spec(path):
                 if isinstance(cell.value, str) and cell.value.startswith("="):
                     assert cell.data_type == "s" and cell.number_format == "@", (sheet, cell.coordinate)
     ws = wb["决策表"]
-    assert ws.cell(1, 1).value == "命中策略" and ws.cell(1, 1).font.bold and color(ws.cell(1, 3)) == FILLS["说明"]
-    assert wb.sheetnames[0] == "设置" and "输入" not in wb.sheetnames  # 0.8: 输入表在「设置」里
+    assert ws.cell(1, 1).value == "命中策略" and ws.cell(1, 1).font.bold and color(ws.cell(1, 2)) is None
+    assert color(ws.cell(1, 3)) == FILLS["说明"] and ws.cell(1, 3).alignment.wrap_text
+    last_col = max(c for c in range(1, ws.max_column + 1) if ws.cell(header_row(ws, "规则ID"), c).value)
+    assert f"C1:{get_column_letter(last_col)}1" in {str(r) for r in ws.merged_cells.ranges}  # 说明合并到表宽
+    assert wb.sheetnames == sorted(wb.sheetnames, key=SHEET_ORDER.index) and "输入" not in wb.sheetnames
+    assert [wb[n].sheet_view.tabSelected for n in wb.sheetnames] == [True] + [False] * (len(wb.sheetnames) - 1)
     settings = wb["设置"]
     top = input_header_row(_rows(settings)) + 1  # 输入表列名行 (1 起); 之上是设置项行
+    titles = [r for r in range(1, top) if settings.cell(r, 1).value in (SETTINGS_TITLE[0], INPUTS_TITLE[0])]
+    assert titles[-1] == top - 1  # 输入表标题紧挨着列名行
     for r in range(1, top):
+        if r in titles:  # 分段标题: 深蓝底白字, 横跨整张表 (说明合并到表宽, 合并区按左上格显示)
+            assert all(color(settings.cell(r, c)) == SECTION_FILL for c in (1, 2, 3))
+            assert settings.cell(r, 1).font.bold and settings.cell(r, 1).font.color.rgb[-6:] == "FFFFFF"
+            span = f"C{r}:{get_column_letter(last_kv_col(settings, top))}{r}"
+            assert span in {str(m) for m in settings.merged_cells.ranges}
+            continue
         if settings.cell(r, 1).value is not None:
             assert settings.cell(r, 1).font.bold and color(settings.cell(r, 1)) is None
         if settings.cell(r, 3).value is not None:
@@ -139,8 +167,9 @@ def _styles(path):
             {k: v.width for k, v in ws.column_dimensions.items()},
             {k: v.height for k, v in ws.row_dimensions.items() if v.height},
             cells,
+            sorted(str(r) for r in ws.merged_cells.ranges),
         )
-    return out
+    return list(wb.sheetnames), out
 
 
 def test_format_is_idempotent_and_keeps_semantics(tmp_path):
@@ -178,6 +207,37 @@ def test_format_applies_spec_to_a_plain_workbook(tmp_path):
     assert color(settings.cell(3, 1)) == HEADER_FILL and settings.freeze_panes == "A4"
     assert wb["变量定义"].cell(2, 1).font.bold
     assert WIDTH_BOUNDS["输入"][0] <= width(ws, 3) <= WIDTH_BOUNDS["输入"][1]
+
+
+def test_format_orders_sheets_and_spans_notes_safely(tmp_path):
+    """sheet 乱序 (消费方脚本先写变量定义) -> format 排成 设置 / 变量定义 / 决策表 / 测试, 只选中第一张;
+    设置项的说明右边还有字时不合并 (合并会清掉它), 分段标题照样上色; 规则语义不变。"""
+    p = make_workbook(
+        tmp_path / "o.xlsx",
+        [["命中策略", "首次命中", "说明文字"], *RULE],
+        [*TEST_HEADER, ["T1", "x", None, "命中"]],
+        derived=[("翻倍", "主表.a * 2")],
+        inputs=[["名称", "匹配", "文件", "说明"], ["主表", "主表", "a.xlsx", None], ["本月", "k", "b.xlsx", None]],
+        settings=[["基准日期", "2026-10-19", "说明一", "说明二"], ["我的标题", None, "标题说明"]],
+    )
+    wb = load_workbook(p)
+    wb.move_sheet("设置", len(wb.sheetnames) - 1)
+    wb.create_sheet("备注")
+    wb.move_sheet("备注", -len(wb.sheetnames) + 1)
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = True
+    wb.save(p)
+    before = _semantics(p)
+    format_workbook(p)
+    wb = load_workbook(p)
+    assert wb.sheetnames == ["设置", "变量定义", "决策表", "测试", "备注"] and wb.active.title == "设置"
+    assert [wb[n].sheet_view.tabSelected for n in wb.sheetnames] == [True, False, False, False, False]
+    s = wb["设置"]
+    assert (s.cell(1, 3).value, s.cell(1, 4).value) == ("说明一", "说明二")  # 右边有字, 没合并
+    assert color(s.cell(2, 1)) == SECTION_FILL and color(s.cell(2, 3)) == SECTION_FILL  # 值为空的非设置项行 = 标题
+    assert "C2:D2" in {str(r) for r in s.merged_cells.ranges}
+    assert color(wb["决策表"].cell(1, 2)) is None and color(wb["决策表"].cell(1, 3)) == FILLS["说明"]
+    assert _semantics(p) == before
 
 
 def test_format_rejects_bad_structure_and_non_excel(tmp_path):
