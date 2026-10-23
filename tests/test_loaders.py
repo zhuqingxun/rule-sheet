@@ -582,6 +582,38 @@ def test_settings_sheet_rejects_unknown_keys(tmp_path):
         load_rules(make_workbook(tmp_path / "r.xlsx", RULE, settings=[["輸出", "x.xlsx"]]))
 
 
+YAML_BASE = """输入:
+  主表: {匹配: 主表}
+规则:
+  - 编号: R1
+    当: [主表.a == 1]
+    则: {b: x}
+测试:
+  - 用例: T1
+    输入: {主表.a: 1}
+    期望: {b: x}
+"""
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "msg"),
+    [
+        ("规则:", "命中测略: 首次命中\n规则:", "YAML 顶层 里的「命中测略」不认识"),  # 否则静默按 优先级 跑
+        ("  - 编号: R1", "  - ID: R1", "YAML 第 1 条规则 里的「ID」不认识"),  # 否则静默编成 R1
+        ("    期望: {b: x}", "    期待: {b: x}", "YAML 第 1 条测试用例 里的「期待」不认识"),  # 否则期望为空, 假通过
+        ("  - 编号: R1\n    当: [主表.a == 1]\n    则: {b: x}", "  - R1", "YAML 第 1 条规则 要写成 键: 值"),
+    ],
+)
+def test_yaml_rejects_unknown_keys(tmp_path, old, new, msg):
+    assert old in YAML_BASE
+    p = tmp_path / "r.yaml"
+    p.write_text(YAML_BASE.replace(old, new), encoding="utf-8")
+    with pytest.raises(ValueError, match=msg):
+        load_rules(p)
+    p.write_text(YAML_BASE, encoding="utf-8")
+    assert load_rules(p).rules[0].rule_id == "R1"
+
+
 def test_legacy_match_sheet_is_converted(tmp_path):
     """0.4 以前的「匹配设置」sheet (左表 / 右表 / 别名 / 匹配键 / 右表重复键) 折算成输入声明, 老文件不用改。"""
     from openpyxl import Workbook

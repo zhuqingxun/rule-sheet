@@ -50,6 +50,10 @@ RULE_KINDS = ("规则ID", "优先级", "输入", "输出", "说明")
 TEST_KINDS = ("用例", "输入", "期望", "说明")
 INPUT_COLS = ("名称", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "文件", "说明")
 INPUT_KEYS = ("文件", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "说明")  # YAML 输入声明认的键
+# YAML 各层认的键: 拼错的键 (命中测略 / 期待 / ID) 静默不生效会让规则悄悄换策略、用例假通过, 一律报错
+YAML_TOP_KEYS = ("输入", "匹配", "设置", "变量", FIELD_GROUP_KEY, "命中策略", "规则", "测试")
+YAML_RULE_KEYS = ("编号", "名称", "优先级", "当", "则", "分支")
+YAML_TEST_KEYS = ("用例", "输入", "期望")
 INPUT_OPTS = (APPEND_KEY, *CONCAT_OPTS)  # 「输入」里除 名称 / 匹配 / 重复键 / 文件 之外的可选项, 都只对参照表有意义
 FIELD_GROUP_COLS = ("名称", "列名", "说明")
 POLICY_LABEL = "命中策略"
@@ -707,8 +711,21 @@ def _yaml_branches(
     return branches
 
 
+def _check_yaml_keys(item: Any, allowed: tuple[str, ...], where: str) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError(f"{where} 要写成 键: 值 的形式, 键只认: {' / '.join(allowed)}")
+    bad = [str(k) for k in item if k not in allowed]
+    if bad:
+        raise ValueError(f"{where} 里的「{bad[0]}」不认识, 只认: {' / '.join(allowed)}")
+    return item
+
+
 def load_yaml_rules(path: Path) -> RuleSet:
-    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    doc = _check_yaml_keys(yaml.safe_load(path.read_text(encoding="utf-8")) or {}, YAML_TOP_KEYS, "YAML 顶层")
+    for i, r in enumerate(doc.get("规则") or [], 1):
+        _check_yaml_keys(r, YAML_RULE_KEYS, f"YAML 第 {i} 条规则")
+    for i, t in enumerate(doc.get("测试") or [], 1):
+        _check_yaml_keys(t, YAML_TEST_KEYS, f"YAML 第 {i} 条测试用例")
     inputs, settings = _yaml_inputs(doc)
     names = [s.name for s in inputs]
     derived = [(str(k), str(v)) for k, v in (doc.get("变量") or {}).items()]
