@@ -28,6 +28,8 @@ SETTING_KEYS = ("基准日期", "输出", JOIN_SEP_KEY)
 FIELD_GROUP_KEY = "字段组"  # Excel sheet 名 / YAML 顶层键: 给一组列起个名字, 决策表里一格就能整组复制 / 清空
 EXIST_VAR = "存在"  # 参照表是否匹配到, 实际变量名是 <输入名>.存在
 BASE_DATE_VAR = "基准日期"
+# run(variables=) / 命令行 --var 能在运行时给值的名字: 规则文件里有声明的槽 (「设置」), 内嵌测试仍用规则文件里的值
+RUNTIME_VARS = (BASE_DATE_VAR,)
 
 Namespace = dict[str, Any]
 Condition = Callable[[Namespace], Any]

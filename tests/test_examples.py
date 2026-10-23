@@ -293,6 +293,38 @@ def test_carry_frontends_agree(tmp_path):
     pd.testing.assert_frame_equal(a[cols], b[cols], check_dtype=False)
 
 
+@CARRY_FRONTENDS
+def test_runtime_base_date_overrides_settings_for_real_data_only(rules_file, tmp_path):
+    """issue #28: variables= 覆盖「设置」里的基准日期; 内嵌用例仍按规则文件的 2026-10-20 写, 照样通过。"""
+    res = run(rules_file, output=tmp_path / "out.xlsx", variables={"基准日期": "2026-11-30"})
+    assert not res.stopped_by_tests and res.tests_passed == len(res.tests) > 0
+    row = res.out.set_index("岗位编码")
+    assert row.loc["K001", "例会时间"] == pd.Timestamp("2026-11-30")  # R1 的 =基准日期
+    assert row.loc["K003", "例会时间"] == pd.Timestamp("2026-09-20")  # 上批带入的不受影响
+    assert "基准日期 = 2026-11-30 (运行时给定)" in res.notes
+    plain = run(rules_file, dry_run=True)
+    assert "基准日期 = 2026-10-20 (规则文件「设置」)" in plain.notes  # 没给就用规则文件的, 并说一声
+
+
+def test_runtime_variables_reject_unknown_names_and_bad_dates(tmp_path):
+    with pytest.raises(ValueError, match="运行时变量「基准日其」不认识, 只认: 基准日期"):
+        run(CARRY_YAML, dry_run=True, variables={"基准日其": "2026-11-30"})
+    for bad in ("下个月", "", None):
+        with pytest.raises(ValueError, match="不是日期"):
+            run(CARRY_YAML, dry_run=True, variables={"基准日期": bad})
+
+
+def test_cli_var_option(tmp_path, capsys):
+    out = tmp_path / "out.xlsx"
+    assert cli.main(["run", str(CARRY_EXCEL), "--var", "基准日期=2026-11-30", "-o", str(out)]) == 0
+    assert "提示: 基准日期 = 2026-11-30 (运行时给定)" in capsys.readouterr().out
+    assert pd.read_excel(out).set_index("岗位编码").loc["K001", "例会时间"] == pd.Timestamp("2026-11-30")
+    assert cli.main(["run", str(CARRY_EXCEL), "--var", "基准日期", "--dry-run"]) == 2
+    assert "--var 要写成 名称=值" in capsys.readouterr().out
+    assert cli.main(["run", str(CARRY_EXCEL), "--var", "季度=Q4", "--dry-run"]) == 2
+    assert "运行时变量「季度」不认识" in capsys.readouterr().out
+
+
 def test_field_group_named_like_a_real_column_is_an_error(tmp_path):
     """组名在决策表里占一个输出列的位置; 主表真有同名列的话那一列永远写不到, 读到数据时报错而不是静默。"""
     src = CARRY_YAML.read_text(encoding="utf-8")

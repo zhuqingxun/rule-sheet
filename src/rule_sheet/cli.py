@@ -1,6 +1,7 @@
 """命令行入口。
 
-rule-sheet run    <规则文件> [-i 名称=路径[#sheet]]... [-o 输出路径] [--base-dir DIR] [--ignore-tests] [--dry-run]
+rule-sheet run    <规则文件> [-i 名称=路径[#sheet]]... [-o 输出路径] [--var 名称=值]... [--base-dir DIR]
+                  [--ignore-tests] [--dry-run]
 rule-sheet test   <规则文件>
 rule-sheet format <规则.xlsx> [-o 路径]      按版式规范重排 Excel 规则工作簿 (颜色 / 列宽 / 换行 / 冻结)
 rule-sheet export <规则.xlsx> [-o 路径]      Excel 决策表导出成 YAML (无损; 源是 Excel, YAML 是生成物)
@@ -65,14 +66,14 @@ def _print_run(res: RunResult) -> None:
         print("\n--dry-run: 未写文件")
 
 
-def _parse_inputs(items: list[str]) -> dict[str, str]:
-    inputs: dict[str, str] = {}
+def _parse_pairs(items: list[str], option: str, value_word: str) -> dict[str, str]:
+    pairs: dict[str, str] = {}
     for item in items:
-        name, sep, path = item.partition("=")
-        if not sep or not name.strip() or not path.strip():
-            raise ValueError(f"-i 要写成 名称=路径, 收到的是 {item!r}")
-        inputs[name.strip()] = path.strip()
-    return inputs
+        name, sep, value = item.partition("=")
+        if not sep or not name.strip() or not value.strip():
+            raise ValueError(f"{option} 要写成 名称={value_word}, 收到的是 {item!r}")
+        pairs[name.strip()] = value.strip()
+    return pairs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="绑定一个输入 (可重复; 路径可带 #sheet名, 相对当前目录), 覆盖规则文件里写的默认文件",
     )
     p_run.add_argument("-o", "--output", type=Path, help="输出文件路径, 覆盖规则文件里的设置")
+    p_run.add_argument(
+        "--var",
+        action="append",
+        default=[],
+        metavar="名称=值",
+        help="运行时给变量的值 (可重复; 目前只认 基准日期), 覆盖规则文件「设置」的同名项; 内嵌测试仍用规则文件的值",
+    )
     p_run.add_argument("--base-dir", type=Path, help="规则文件内相对路径的基准目录 (默认: 规则文件所在目录)")
     p_run.add_argument("--ignore-tests", action="store_true", help="内嵌测试失败也继续")
     p_run.add_argument("--dry-run", action="store_true", help="只打印, 不写文件")
@@ -153,8 +161,9 @@ def main(argv: list[str] | None = None) -> int:
         res = run(
             ns.rules,
             base_dir=ns.base_dir,
-            inputs=_parse_inputs(ns.input),
+            inputs=_parse_pairs(ns.input, "-i", "路径"),
             output=ns.output,
+            variables=_parse_pairs(ns.var, "--var", "值"),
             ignore_tests=ns.ignore_tests,
             dry_run=ns.dry_run,
         )

@@ -25,6 +25,7 @@ from .model import (
     JOIN_SEP_KEY,
     NULL,
     NULL_WORD,
+    RUNTIME_VARS,
     TRUE_WORDS,
     Condition,
     FieldGroupRef,
@@ -203,17 +204,49 @@ def _append_only_rows(
     return grown, flag
 
 
-def build_namespace(rs: RuleSet, tables: dict[str, pd.DataFrame], notes: list[str] | None = None) -> Namespace:
+def resolve_base_date(rs: RuleSet, variables: dict[str, Any] | None = None) -> tuple[pd.Timestamp, str]:
+    """真实数据用的基准日期与来源: 运行时给的 (variables) 优先, 其次规则文件「设置」, 都没有取运行当天。
+
+    variables 的键只认 RUNTIME_VARS: 拼错的名字静默不生效会让结果悄悄用回规则文件里的值, 所以报错。
+    内嵌测试不走这里 (case_namespace 用规则文件的值), 用例里的日期是按它写的。"""
+    variables = dict(variables or {})
+    unknown = [k for k in variables if k not in RUNTIME_VARS]
+    if unknown:
+        raise ValueError(f"运行时变量「{unknown[0]}」不认识, 只认: {' / '.join(RUNTIME_VARS)}")
+    if BASE_DATE_VAR in variables:
+        raw, source = variables[BASE_DATE_VAR], "运行时给定"
+    elif rs.settings.get(BASE_DATE_VAR):
+        raw, source = rs.settings[BASE_DATE_VAR], "规则文件「设置」"
+    else:
+        return pd.Timestamp(date.today()), "规则文件没设, 取运行当天"
+    try:
+        value = pd.Timestamp(raw)
+    except (ValueError, TypeError):
+        value = pd.NaT
+    if pd.isna(value):
+        raise ValueError(f"{BASE_DATE_VAR}「{raw}」({source}) 不是日期, 写成 2026-10-23 这样")
+    return value, source
+
+
+def build_namespace(
+    rs: RuleSet,
+    tables: dict[str, pd.DataFrame],
+    notes: list[str] | None = None,
+    *,
+    variables: dict[str, Any] | None = None,
+) -> Namespace:
     """以主表为锚, 每个参照表按各自的键 left join 进来。
 
     匹配之前: 每张表自己的行上先算带该表前缀的派生变量 (`报表7.现岗`); `重复键: 拼接` 的参照表按键聚合成一键一行;
     `独有行: 追加` 的参照表把主表没有的键追加到行集末尾 (按声明顺序, 后面的对齐到已扩的行集),
     主表 `.存在` 在这些行上为 否。直接调 apply_rules 的编排器必须从这里拿命名空间, 聚合 / 追加都发生在这一步;
     扩展后的主表用 primary_frame 取。
+    variables: 运行时给的值 (目前只有 基准日期), 覆盖规则文件「设置」里的同名项, 见 resolve_base_date。
     """
     primary = rs.primary
-    base_date_raw = rs.settings.get(BASE_DATE_VAR)
-    base_date = pd.Timestamp(base_date_raw) if base_date_raw else pd.Timestamp(date.today())
+    base_date, source = resolve_base_date(rs, variables)
+    if notes is not None:
+        notes.append(f"{BASE_DATE_VAR} = {text_of(base_date)} ({source})")
     base = tables[primary.name]
     base_cols = list(base.columns)
     prepared = {s.name: _prepare_lookup(rs, s, tables[s.name], base_cols, base_date, notes) for s in rs.lookups}
@@ -620,17 +653,21 @@ def run(
     base_dir: str | Path | None = None,
     inputs: dict[str, str] | None = None,
     output: str | Path | None = None,
+    variables: dict[str, Any] | None = None,
     ignore_tests: bool = False,
     dry_run: bool = False,
 ) -> RunResult:
     """完整流程: 加载规则 -> 跑内嵌测试 -> 绑定并读入各输入表 -> 执行 -> 写出。
 
     inputs: {输入名: 文件路径 (可带 #sheet名)}, 覆盖规则文件里的默认文件, 相对当前目录。
+    variables: {名字: 值}, 目前只认 基准日期; 覆盖规则文件「设置」里的同名项, 只作用于真实数据
+    (内嵌测试仍用规则文件的值)。
     规则文件里的相对路径 (默认文件 / 输出) 相对 base_dir, 默认为规则文件所在目录。
     """
     rules_path = Path(rules_path)
     base = Path(base_dir) if base_dir else rules_path.parent
     rs = load_rules(rules_path)
+    resolve_base_date(rs, variables)  # 键名 / 日期写错在跑测试和读表之前就报
     outcomes = run_tests(rs) if rs.tests else []
     if any(not o.passed for o in outcomes) and not ignore_tests:
         return RunResult(rs, outcomes, stopped_by_tests=True)
@@ -646,7 +683,7 @@ def run(
         )
 
     notes: list[str] = []
-    ns = build_namespace(rs, tables, notes)
+    ns = build_namespace(rs, tables, notes, variables=variables)
     primary_df = primary_frame(rs, ns, columns)  # 独有行: 追加 之后行集比读入的主表多, 输出的行就是它的行
     add_derived(rs, ns, primary_df.index, lenient=False)
     originals = {col: primary_df[col] for col in rs.outputs if col in primary_df.columns}

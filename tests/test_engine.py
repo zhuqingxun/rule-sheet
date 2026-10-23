@@ -128,7 +128,7 @@ def test_duplicate_lookup_keys_policy():
     right = pd.DataFrame({"编号": [1, 1], "v": ["first", "second"]})
     notes: list[str] = []
     ns = build_namespace(make_rs([], []), {"主表": left, "本月": right}, notes)
-    assert ns["本月.v"].tolist() == ["first"] and notes
+    assert ns["本月.v"].tolist() == ["first"] and any("按「取第一条」处理" in n for n in notes)
     strict = make_rs([], [])
     strict.lookups[0].dup_policy = "报错"
     with pytest.raises(ValueError, match="输入「本月」有 1 行重复键"):
@@ -140,6 +140,31 @@ def test_missing_key_column():
         build_namespace(make_rs([], []), {"主表": pd.DataFrame({"a": [1]}), "本月": pd.DataFrame({"编号": [1]})})
     with pytest.raises(ValueError, match="输入「本月」没有匹配键列「编号」"):
         build_namespace(make_rs([], []), {"主表": pd.DataFrame({"编号": [1]}), "本月": pd.DataFrame({"b": [1]})})
+
+
+def test_build_namespace_runtime_base_date():
+    """issue #28: 分步调用者也能给基准日期; 带输入前缀的派生变量 (聚合前在参照表行上算) 同样看到注入值。"""
+    rs = make_rs(
+        [],
+        [],
+        settings={"基准日期": date(2026, 10, 19)},
+        derived=[("本月.天数", "天数差(基准日期, 本月.日期)")],
+    )
+    tables = {
+        "主表": pd.DataFrame({"编号": [1]}),
+        "本月": pd.DataFrame({"编号": [1], "日期": [pd.Timestamp("2026-10-01")]}),
+    }
+    notes: list[str] = []
+    ns = build_namespace(rs, tables, notes, variables={"基准日期": pd.Timestamp("2026-10-31")})
+    assert ns["基准日期"] == pd.Timestamp("2026-10-31") and ns["本月.天数"].tolist() == [30]
+    assert notes[0] == "基准日期 = 2026-10-31 (运行时给定)"
+    ns = build_namespace(rs, tables)  # 不给就是规则文件「设置」里的
+    assert ns["基准日期"] == pd.Timestamp("2026-10-19") and ns["本月.天数"].tolist() == [18]
+    notes = []
+    build_namespace(make_rs([], []), tables, notes)
+    assert notes[0].endswith("(规则文件没设, 取运行当天)")
+    with pytest.raises(ValueError, match="运行时变量「输出」不认识"):  # 输出 / 拼接分隔符 是设置项, 但不是运行时变量
+        build_namespace(rs, tables, variables={"输出": "x.xlsx"})
 
 
 def test_concat_policy_aggregates_rows_before_join():
