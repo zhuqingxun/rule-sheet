@@ -580,23 +580,26 @@ def case_base_date(rs: RuleSet) -> tuple[pd.Timestamp, str]:
     return resolve_base_date(rs)
 
 
-def _check_case_dates(rs: RuleSet) -> None:
-    """规则用到基准日期、用例却没有固定的基准日期: 按运行当天算, 今天过、明天就可能不过, 先报错。"""
+LOOSE_DATE_ERROR = (
+    f"规则引用了{BASE_DATE_VAR}, 但这条用例没有固定的{BASE_DATE_VAR} (按运行当天算, 今天通过、换一天可能就不通过); "
+    f"在「测试」sheet 表头上方写一行 {BASE_DATE_VAR} | 2026-10-23 "
+    f"(YAML: 测试: {{{BASE_DATE_VAR}: 2026-10-23, 用例: [...]}}), 或给用例填 {BASE_DATE_VAR} 列"
+)
+
+
+def _has_fixed_date(rs: RuleSet, tc: TestCase) -> bool:
+    """规则没用到基准日期, 或用例有固定的基准日期 (自己的列 / 测试的 / 「设置」的)。"""
     if not rs.uses_base_date or rs.test_base_date is not None or rs.settings.get(BASE_DATE_VAR):
-        return
-    loose = [tc.name for tc in rs.tests if is_blank(tc.inputs.get(BASE_DATE_VAR))]
-    if loose:
-        raise ValueError(
-            f"规则引用了{BASE_DATE_VAR}, 但用例 {', '.join(loose)} 没有固定的{BASE_DATE_VAR} (会按运行当天算, "
-            f"今天通过、换一天可能就不通过); 在「测试」sheet 表头上方写一行 {BASE_DATE_VAR} | 2026-10-23 "
-            f"(YAML: 测试: {{{BASE_DATE_VAR}: 2026-10-23, 用例: [...]}}), 或给这几条用例填 {BASE_DATE_VAR} 列"
-        )
+        return True
+    return not is_blank(tc.inputs.get(BASE_DATE_VAR))
 
 
 def run_tests(rs: RuleSet) -> list[TestOutcome]:
-    _check_case_dates(rs)
     outcomes: list[TestOutcome] = []
     for tc in rs.tests:
+        if not _has_fixed_date(rs, tc):  # 记成这条用例出错 (不抛): test 照样红, run 的 ignore_tests 语义不变
+            outcomes.append(TestOutcome(tc.name, False, error=LOOSE_DATE_ERROR))
+            continue
         ns, originals = case_namespace(rs, tc)
         try:
             results, hit_ids = apply_rules(rs, ns, originals)

@@ -926,13 +926,20 @@ def test_test_sheet_base_date_owns_the_cases(tmp_path):
 
 
 def test_cases_need_a_fixed_base_date_when_rules_use_it(tmp_path):
-    """规则引用了基准日期, 用例却哪里都没有固定的: 按当天算会今天过明天挂, 跑测试时报错; 「设置」有值的老文件照旧;
-    不引用基准日期的规则文件不受影响。"""
-    from rule_sheet.engine import run_tests
+    """规则引用了基准日期, 用例却哪里都没有固定的: 按当天算会今天过明天挂, 这些用例记为出错 (不抛异常: test 照样红,
+    run 照样停, 但 ignore_tests=True 仍能继续); 「设置」有值的老文件照旧; 不引用基准日期的规则文件不受影响。"""
+    from rule_sheet.engine import run, run_tests
 
-    rs = load_rules(make_workbook(tmp_path / "r.xlsx", BD_RULE, BD_CASES))
-    with pytest.raises(ValueError, match="用例 T1, T2 没有固定的基准日期"):
-        run_tests(rs)
+    p = make_workbook(tmp_path / "r.xlsx", BD_RULE, BD_CASES)
+    rs = load_rules(p)
+    outcomes = run_tests(rs)
+    assert [o.passed for o in outcomes] == [False, False]
+    assert all("这条用例没有固定的基准日期" in o.error for o in outcomes)
+    pd.DataFrame({"k": [1], "d": [date(2026, 10, 20)], "标记": [None]}).to_excel(tmp_path / "a.xlsx", index=False)
+    pd.DataFrame({"k": [1]}).to_excel(tmp_path / "b.xlsx", index=False)
+    assert run(p, dry_run=True).stopped_by_tests
+    res = run(p, dry_run=True, ignore_tests=True, variables={"基准日期": "2026-10-20"})
+    assert not res.stopped_by_tests and res.out.loc[0, "标记"] == "新"
     old = load_rules(make_workbook(tmp_path / "s.xlsx", BD_RULE, BD_CASES, settings=[["基准日期", "2026-10-20"]]))
     assert all(o.passed for o in run_tests(old))
     plain = load_rules(make_workbook(tmp_path / "p.xlsx", RULE, [*TEST_HEADER, ["T1", "x", None, "命中"]]))
@@ -960,8 +967,7 @@ def test_yaml_tests_with_base_date(tmp_path):
     p.write_text(head + "\n".join(line[2:] for line in cases.splitlines()) + "\n", encoding="utf-8")
     rs = load_rules(p)
     assert rs.test_base_date is None and len(rs.tests) == 1
-    with pytest.raises(ValueError, match="没有固定的基准日期"):
-        run_tests(rs)
+    assert "没有固定的基准日期" in run_tests(rs)[0].error
 
 
 def test_mentions_base_date_follows_name_boundaries():
