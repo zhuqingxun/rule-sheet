@@ -446,6 +446,28 @@ def test_append_option_survives_both_directions(tmp_path):
     assert any(d.startswith("输入「上期」的选项") for d in diff_rules(src, out).differences)
 
 
+def test_filter_survives_both_directions_and_diff(tmp_path):
+    """issue #30: 筛选随 Excel -> YAML 导出 (引号原样), YAML -> Excel 进输入表的「筛选」列, diff 比得出差别。"""
+    text = excel_to_yaml(TAGS_EXCEL)
+    assert (
+        '筛选: 关键岗位清单.配置类别 == "关键岗位"' in text or "筛选: '关键岗位清单.配置类别 == \"关键岗位\"'" in text
+    )
+    assert load_rules(_write(tmp_path / "t.yaml", text)).lookups[0].filter == '关键岗位清单.配置类别 == "关键岗位"'
+    out = export_workbook(TAGS_YAML, tmp_path / "t.xlsx")
+    ws = load_workbook(out)["设置"]
+    header_row = next(r for r in range(1, ws.max_row + 1) if ws.cell(r, 1).value == "名称")
+    header = [ws.cell(header_row, c).value for c in range(1, ws.max_column + 1)]
+    col = header.index("筛选") + 1
+    assert ws.cell(header_row + 2, col).value == '关键岗位清单.配置类别 == "关键岗位"'
+    p = _write(tmp_path / "g.yaml", TAGS_YAML.read_text(encoding="utf-8").replace('== "关键岗位"', '== "保密岗位"'))
+    assert any(d.startswith("输入「关键岗位清单」的选项") for d in diff_rules(TAGS_EXCEL, p).differences)
+
+
+def _write(path, text):
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 BRANCH_YAML = (
     "输入: {主表: {匹配: 主表}}\n命中策略: 首次命中\n规则:\n"
     '  - 编号: R1\n    当: [主表.c == "启用"]\n    则: {备注: 默认}\n    分支:\n'

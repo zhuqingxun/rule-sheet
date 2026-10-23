@@ -36,6 +36,7 @@ from .model import (
     EXIST_VAR,
     FALSE_WORDS,
     FIELD_GROUP_KEY,
+    FILTER_KEY,
     JOIN_SEP_KEY,
     NULL_WORD,
     PRIMARY_WORD,
@@ -223,10 +224,13 @@ def _match_text(spec: Any, primary: str) -> str:
 
 
 def _input_opts(spec: Any) -> dict[str, Any]:
-    """参照表的可选项 (只写非默认的): 独有行 + 重复键: 拼接 的四项。Excel「设置」sheet 的输入表与 YAML 输入声明共用。"""
+    """参照表的可选项 (只写非默认的): 筛选 + 独有行 + 重复键: 拼接 的四项。
+    Excel「设置」sheet 的输入表与 YAML 输入声明共用。"""
     if spec.primary:
         return {}
-    out: dict[str, Any] = {APPEND_KEY: "追加"} if spec.append else {}
+    out: dict[str, Any] = {FILTER_KEY: spec.filter} if spec.filter else {}
+    if spec.append:
+        out[APPEND_KEY] = "追加"
     if spec.dup_policy != CONCAT_POLICY:
         return out
     if spec.sort:
@@ -663,7 +667,9 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
         ws.append([])
     ws.append(list(INPUTS_TITLE))
     used = {k for s in rs.inputs for k in _input_opts(s)}
-    opt_cols = ([APPEND_KEY] if APPEND_KEY in used else []) + (list(CONCAT_OPTS) if used & set(CONCAT_OPTS) else [])
+    opt_cols = [k for k in (FILTER_KEY, APPEND_KEY) if k in used] + (
+        list(CONCAT_OPTS) if used & set(CONCAT_OPTS) else []
+    )
     ws.append(["名称", "匹配", "重复键", *opt_cols, "文件", "说明"])
     for s in rs.inputs:
         opts = _input_opts(s)

@@ -622,6 +622,29 @@ def test_field_group_copy_is_fine_under_join_policy(tmp_path):
 RULE = [*HEADER, ["R1", 1, "x", "-", "命中"]]
 
 
+def test_filter_declaration(tmp_path):
+    """issue #30: 输入表「筛选」列 / YAML 筛选: 只对参照表; 主表写了报错; 引用别的输入加载时就报错。"""
+    rows = [
+        ["名称", "匹配", "筛选"],
+        ["主表", "主表", None],
+        ["本月", "k", '本月.类别 == "A" 且 本月.日期 <= 基准日期'],
+    ]
+    rs = load_rules(make_workbook(tmp_path / "a.xlsx", RULE, inputs=rows))
+    assert rs.lookups[0].filter == '本月.类别 == "A" 且 本月.日期 <= 基准日期' and rs.primary.filter == ""
+    bad_primary = [["名称", "匹配", "筛选"], ["主表", "主表", '主表.a == "x"'], ["本月", "k", None]]
+    with pytest.raises(ValueError, match="主表「主表」不能写「筛选」: 输出的行就是主表的行"):
+        load_rules(make_workbook(tmp_path / "b.xlsx", RULE, inputs=bad_primary))
+    other = [["名称", "匹配", "筛选"], ["主表", "主表", None], ["本月", "k", '主表.a == "x"']]
+    with pytest.raises(ValueError, match="输入「本月」的「筛选」引用了「主表.a」; 筛选在对齐到主表之前"):
+        load_rules(make_workbook(tmp_path / "c.xlsx", RULE, inputs=other))
+    p = tmp_path / "r.yaml"
+    p.write_text(
+        '输入:\n  主表: {匹配: 主表}\n  本月:\n    匹配: k\n    筛选: 本月.类别 in ("A", "B")\n规则:\n  - 则: {y: 1}\n',
+        encoding="utf-8",
+    )
+    assert load_rules(p).lookups[0].filter == '本月.类别 in ("A", "B")'
+
+
 def test_excel_inputs_sheet(tmp_path):
     rows = [
         ["说明", "名称", "文件", "匹配", "重复键"],  # 列顺序随意, 多余的列忽略

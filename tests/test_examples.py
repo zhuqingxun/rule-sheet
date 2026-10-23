@@ -20,6 +20,7 @@ from .conftest import (
     STATUS_DIR,
     STATUS_EXCEL,
     STATUS_YAML,
+    TAGS_DIR,
     TAGS_EXCEL,
     TAGS_YAML,
     YAML_RULES,
@@ -229,6 +230,19 @@ def test_tags_real_data_collects_all_hits(rules_file, tmp_path):
     assert row.loc["J002", "变更明细"] == "显示名: 空 -> 3-华东代表处/华东代表处-行政助理"
     back = pd.read_excel(res.written).set_index("岗位编码")
     assert back.loc["J004", "标签"] == "高管/直管/高职级/新推荐" and back.loc["J007", "职能"] == "职能平台/财务"
+
+
+def test_tags_filter_keeps_only_one_category(tmp_path):
+    """issue #30: 关键岗位清单 混着 保密岗位 一类 (J004); 筛选在对齐之前只留 关键岗位, 去掉筛选 J004 就被误标。"""
+    res = run(TAGS_YAML, dry_run=True)
+    assert "输入「关键岗位清单」按筛选保留 3 / 4 行" in res.notes
+    assert "关键岗位" not in res.out.set_index("岗位编码").loc["J004", "标签"]
+    src = TAGS_YAML.read_text(encoding="utf-8")
+    p = tmp_path / "no_filter.yaml"
+    p.write_text(src.replace('    筛选: 关键岗位清单.配置类别 == "关键岗位"', ""), encoding="utf-8")
+    assert "筛选: 关键岗位清单" not in p.read_text(encoding="utf-8")
+    naive = run(p, base_dir=TAGS_DIR, dry_run=True).out.set_index("岗位编码")
+    assert "关键岗位" in naive.loc["J004", "标签"]  # 对照: 不筛选就把另一类配置当成关键岗位
 
 
 def test_tags_frontends_agree(tmp_path):

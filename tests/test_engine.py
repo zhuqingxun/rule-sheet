@@ -168,6 +168,39 @@ def test_build_namespace_runtime_base_date():
         build_namespace(rs, tables, variables={"输出": "x.xlsx"})
 
 
+def test_filter_keeps_rows_before_dedup_and_join():
+    """issue #30: 筛选在去重 / 对齐之前: 别的类别里的同名键不算重复 (重复键: 报错 不误报), 也不会被取第一条挑中;
+    可以引用带前缀的派生列和 基准日期 (运行时给的也生效); 一行不剩报错; 引用不存在的列报错并指出是哪个输入。"""
+    base = pd.DataFrame({"组织": ["X", "A", "B"]})
+    mixed = pd.DataFrame(
+        {
+            "类别": ["销服", "职能", "职能", "销服"],
+            "项": ["X", "X", "A", "B"],
+            "生效": pd.to_datetime(["2026-01-01", "2026-01-01", "2026-12-01", "2026-01-01"]),
+        }
+    )
+    specs = inputs_of(("主表", None), ("职能", ["项=组织"]))
+    specs[1].dup_policy = "报错"
+    specs[1].filter = '职能.类别 == "职能" 且 职能.生效 <= 基准日期'
+    rs = make_rs([], [], inputs=specs, settings={"基准日期": date(2026, 10, 23)})
+    notes: list[str] = []
+    ns = build_namespace(rs, {"主表": base, "职能": mixed}, notes)
+    assert ns["职能.存在"].tolist() == [True, False, False]  # A 还没生效, B 是销服的
+    assert "输入「职能」按筛选保留 1 / 4 行" in notes
+    ns = build_namespace(rs, {"主表": base, "职能": mixed}, variables={"基准日期": "2026-12-31"})
+    assert ns["职能.存在"].tolist() == [True, True, False]
+    specs[1].filter = '职能.标记 == "是"'  # 带前缀的派生列先算, 筛选能用它
+    rs.derived = [("职能.标记", '如果(职能.类别 == "职能", "是", "否")')]
+    assert build_namespace(rs, {"主表": base, "职能": mixed})["职能.存在"].tolist() == [True, True, False]
+    rs.derived = []
+    specs[1].filter = '职能.类别 == "职能 "'
+    with pytest.raises(ValueError, match='输入「职能」按筛选「职能.类别 == "职能 "」一行都没留下 \\(原有 4 行\\)'):
+        build_namespace(rs, {"主表": base, "职能": mixed})
+    specs[1].filter = '职能.种类 == "职能"'
+    with pytest.raises(ValueError, match='输入「职能」的筛选「职能.种类 == "职能"」求值失败'):
+        build_namespace(rs, {"主表": base, "职能": mixed})
+
+
 def test_concat_policy_aggregates_rows_before_join():
     """重复键: 拼接 (issue #17): 同键的行按排序接成一行 (空值排末尾), 空值占位保位置, 带序号;
     带输入前缀的派生变量在那张表的行上算、发生在聚合之前; 没设占位符且整组全空的列为空。"""

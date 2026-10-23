@@ -31,6 +31,7 @@ from .model import (
     EXIST_VAR,
     FALSE_WORDS,
     FIELD_GROUP_KEY,
+    FILTER_KEY,
     HIT_POLICIES,
     JOIN_POLICY,
     JOIN_SEP_KEY,
@@ -50,13 +51,14 @@ from .model import (
 
 RULE_KINDS = ("规则ID", "优先级", "输入", "输出", "说明")
 TEST_KINDS = ("用例", "输入", "期望", "说明")
-INPUT_COLS = ("名称", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "文件", "说明")
-INPUT_KEYS = ("文件", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "说明")  # YAML 输入声明认的键
+INPUT_COLS = ("名称", "匹配", FILTER_KEY, "重复键", APPEND_KEY, *CONCAT_OPTS, "文件", "说明")
+INPUT_KEYS = ("文件", "匹配", FILTER_KEY, "重复键", APPEND_KEY, *CONCAT_OPTS, "说明")  # YAML 输入声明认的键
 # YAML 各层认的键: 拼错的键 (命中测略 / 期待 / ID) 静默不生效会让规则悄悄换策略、用例假通过, 一律报错
 YAML_TOP_KEYS = ("输入", "匹配", "设置", "变量", FIELD_GROUP_KEY, "命中策略", JOIN_SEP_KEY, "规则", "测试")
 YAML_RULE_KEYS = ("编号", "名称", "优先级", "当", "则", "分支")
 YAML_TEST_KEYS = ("用例", "输入", "期望")
-INPUT_OPTS = (APPEND_KEY, *CONCAT_OPTS)  # 「输入」里除 名称 / 匹配 / 重复键 / 文件 之外的可选项, 都只对参照表有意义
+# 输入表里除 名称 / 匹配 / 重复键 / 文件 之外的可选项, 都只对参照表有意义
+INPUT_OPTS = (FILTER_KEY, APPEND_KEY, *CONCAT_OPTS)
 FIELD_GROUP_COLS = ("名称", "列名", "说明")
 POLICY_LABEL = "命中策略"
 LEGACY_DEFAULT_NAMES = ("主表", "本月")  # 0.4 以前「匹配设置」里左右表别名的默认值
@@ -186,6 +188,11 @@ def _build_inputs(rows: list[tuple[str, Any, Any, Any, dict[str, Any]]], where: 
         policy = _text(dup_policy) or "取第一条"
         given = [k for k in INPUT_OPTS if _text(opts.get(k))]
         if name == primary:
+            if FILTER_KEY in given:
+                raise ValueError(
+                    f"{where}: 主表「{name}」不能写「{FILTER_KEY}」: 输出的行就是主表的行, 筛掉就是删输出行; "
+                    f"只想改其中一部分行, 写在规则条件里"
+                )
             if given or _text(dup_policy):
                 raise ValueError(f"{where}: 主表「{name}」不能写「{(given or ['重复键'])[0]}」, 它们只对参照表有意义")
             specs.append(InputSpec(name, primary=True, path=file))
@@ -211,10 +218,25 @@ def _build_inputs(rows: list[tuple[str, Any, Any, Any, dict[str, Any]]], where: 
                 dup_policy=policy,
                 path=file,
                 append=APPEND_WORDS.get(append_text, False),
+                filter=_check_filter(_text(opts.get(FILTER_KEY)), name, names, where),
                 **extra,
             )
         )
     return specs
+
+
+def _check_filter(expr: str, name: str, names: list[str], where: str) -> str:
+    """筛选在匹配之前、这张表自己的行上算: 只能引用 <本输入>.<列> (含它带前缀的派生变量) 与 基准日期。
+    引用别的输入加载时就报错 (那时别的表还没对齐进来, 运行时只会报一个看不懂的「未定义」)。"""
+    if not expr:
+        return ""
+    others = [n for n in find_names(expr, names, [*FUNCS, BASE_DATE_VAR]) if n.partition(".")[0] != name]
+    if others:
+        raise ValueError(
+            f"{where}: 输入「{name}」的「{FILTER_KEY}」引用了「{others[0]}」; 筛选在对齐到主表之前、"
+            f"这张表自己的行上算, 只能引用 {name}.<列> 和 {BASE_DATE_VAR}"
+        )
+    return expr
 
 
 def _check_settings(settings: dict[str, Any], where: str, *, legacy_sep: bool) -> dict[str, Any]:

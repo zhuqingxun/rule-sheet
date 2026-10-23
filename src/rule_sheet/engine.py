@@ -108,6 +108,29 @@ def _add_input_derived(rs: RuleSet, spec: InputSpec, df: pd.DataFrame, base_date
     return df
 
 
+def _filter_rows(spec: InputSpec, df: pd.DataFrame, base_date: pd.Timestamp, notes: list[str] | None) -> pd.DataFrame:
+    """筛选: 在这张表自己的行上算表达式, 只留成立的行 (空值不成立)。筛完一行不剩报错: 多半是常量写错了,
+    不报错的话这个输入的 .存在 会整列静默变成 否。"""
+    if not spec.filter or df.empty:
+        return df
+    local: Namespace = {f"{spec.name}.{c}": df[c] for c in df.columns}
+    local[BASE_DATE_VAR] = base_date
+    try:
+        keep = to_mask(eval_expr(spec.filter, local), local)
+    except (ValueError, KeyError) as exc:
+        msg = exc.args[0] if exc.args else exc
+        raise ValueError(f"输入「{spec.name}」的筛选「{spec.filter}」求值失败: {msg}") from exc
+    kept = int(keep.sum())
+    if kept == 0:
+        raise ValueError(
+            f"输入「{spec.name}」按筛选「{spec.filter}」一行都没留下 (原有 {len(df)} 行); "
+            f"多半是值写错了 (多了空格、全角半角不一致), 对照数据表里那一列的实际取值"
+        )
+    if notes is not None:
+        notes.append(f"输入「{spec.name}」按筛选保留 {kept} / {len(df)} 行")
+    return df[keep.to_numpy()]
+
+
 def _concat_group(values: list[Any], spec: InputSpec) -> str | None:
     """重复键: 拼接 下一个键的一列 -> 一个文本: 空格子换成占位符 (位置保留), 可带序号; 没设占位符且整组全空则为空。"""
     items = [None if is_na(v) else text_of(v) for v in values]
@@ -157,6 +180,7 @@ def _prepare_lookup(
             raise ValueError(f"输入「{spec.name}」没有匹配键列「{c}」")
     df = df[df[mine].notna().all(axis=1)]  # 键为空的行不参与匹配: pandas merge 会把两边的 NaN 配成一对
     df = _add_input_derived(rs, spec, df, base_date)
+    df = _filter_rows(spec, df, base_date, notes)  # 在去重 / 聚合之前: 别的类别里的同名键不算重复
     dup = df.duplicated(subset=mine, keep="first")
     if dup.any():
         if spec.dup_policy == CONCAT_POLICY:
