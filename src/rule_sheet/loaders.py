@@ -449,8 +449,8 @@ def input_header_row(grid: list[list[Any]]) -> int | None:
 
 
 def read_setting_rows(rows: list[list[Any]]) -> dict[str, Any]:
-    """设置项行: 每行第一个有字的格是设置项, 紧挨着它右边一格是值, 再往右是说明; 值为空的行跳过 (标题 / 说明行)。
-    旧版「设置」sheet 的表头行 (设置项 / 值) 也跳过, 所以新旧两种「设置」sheet 用同一个读法。"""
+    """0.8「设置」的设置项行: 每行第一个有字的格是设置项, 紧挨着它右边一格是值, 再往右是说明; 值为空的行跳过
+    (标题 / 说明行)。写着 设置项 / 值 的表头行也跳过 (从旧版剪过来的); 别的表头文字会被当成设置项报错。"""
     out: dict[str, Any] = {}
     for row in rows:
         j = next((k for k, v in enumerate(row) if _text(v)), None)
@@ -480,7 +480,9 @@ def _read_inputs_and_settings(wb: Any, path: Path) -> tuple[list[InputSpec], dic
         return inputs, _check_settings(read_setting_rows(grid[:header]), where, legacy_sep=False)
     if LEGACY_INPUTS_SHEET in wb.sheetnames:
         inputs = _read_inputs_table(_rows(wb[LEGACY_INPUTS_SHEET]), 0, f"「{LEGACY_INPUTS_SHEET}」sheet")
-        return inputs, _check_settings(read_setting_rows(grid), where, legacy_sep=True)
+        # 旧「设置」照 0.7 的读法: 第 1 行无论写什么都是表头 (消费方的表头文字不一定是 设置项 / 值)
+        settings = _read_kv(wb[SETTINGS_SHEET]) if SETTINGS_SHEET in wb.sheetnames else {}
+        return inputs, _check_settings(settings, where, legacy_sep=True)
     if "匹配设置" in wb.sheetnames:  # 0.4 以前的写法, 保留一个版本的兼容
         return _legacy_inputs(_read_kv(wb["匹配设置"]))
     raise ValueError(

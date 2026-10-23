@@ -195,6 +195,10 @@ def test_settings_sheet_holds_settings_and_inputs(tmp_path):
     assert rs.settings == {"基准日期": "2026-10-19", "输出": "o.xlsx"} and rs.names == ["主表", "本月"]
     legacy = load_rules(make_workbook(tmp_path / "b.xlsx", RULE, settings=settings[1:3], legacy=True))
     assert legacy.settings == rs.settings and legacy.names == rs.names
+    wb = load_workbook(tmp_path / "b.xlsx")  # 旧「设置」的第 1 行不管写什么都是表头, 和 0.7 一样
+    wb["设置"]["A1"], wb["设置"]["B1"] = "项目", "取值"
+    wb.save(tmp_path / "b.xlsx")
+    assert load_rules(tmp_path / "b.xlsx").settings == rs.settings
     wb = load_workbook(make_workbook(tmp_path / "d.xlsx", RULE))
     ws = wb.create_sheet("输入")
     for row in INPUTS:
