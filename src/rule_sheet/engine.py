@@ -534,7 +534,7 @@ def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.S
             val = pd.Timestamp(val)
         dtype = object if isinstance(val, str) or val is None else None
         ns[name] = pd.Series([val], index=index, dtype=dtype)
-    ns.setdefault(BASE_DATE_VAR, pd.Timestamp(rs.settings.get(BASE_DATE_VAR) or date.today()))
+    ns.setdefault(BASE_DATE_VAR, resolve_base_date(rs)[0])  # 不传 variables: 用例永远按规则文件里的基准日期
     # 主表的 .存在 没给默认 是 (普通行); 要测追加来的行就写 否
     ns.setdefault(f"{rs.primary.name}.{EXIST_VAR}", pd.Series([True], index=index))
     for name in rs.variables:  # 用例没提到的变量 = 空值
