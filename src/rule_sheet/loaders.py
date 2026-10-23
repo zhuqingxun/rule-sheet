@@ -12,12 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import yaml
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from .conditions import all_of, any_of, build_condition, cell_condition, strings_in
-from .expressions import FUNCS, find_names, split_top_level
+from .expressions import FUNCS, find_names, outside_strings, split_top_level
 from .model import (
     APPEND_KEY,
     APPEND_WORDS,
@@ -57,6 +58,7 @@ INPUT_KEYS = ("文件", "匹配", FILTER_KEY, "重复键", APPEND_KEY, *CONCAT_O
 YAML_TOP_KEYS = ("输入", "匹配", "设置", "变量", FIELD_GROUP_KEY, "命中策略", JOIN_SEP_KEY, "规则", "测试")
 YAML_RULE_KEYS = ("编号", "名称", "优先级", "当", "则", "分支")
 YAML_TEST_KEYS = ("用例", "输入", "期望")
+YAML_TESTS_KEYS = (BASE_DATE_VAR, "用例")  # 测试: 写成字典时 (带这组用例的基准日期)
 # 输入表里除 名称 / 匹配 / 重复键 / 文件 之外的可选项, 都只对参照表有意义
 INPUT_OPTS = (FILTER_KEY, APPEND_KEY, *CONCAT_OPTS)
 FIELD_GROUP_COLS = ("名称", "列名", "说明")
@@ -573,6 +575,37 @@ def find_meta_value(grid: list[list[Any]], kind_row: int, label: str) -> Any:
     return None
 
 
+def _check_test_date(value: Any, where: str) -> Any:
+    """测试的基准日期: 不是日期加载时就报错 (跑到用例才报, 报错会被当成某条用例失败)。返回原值, 导出时保持原样。"""
+    if value in (None, ""):
+        return None
+    try:
+        ok = not pd.isna(pd.Timestamp(value))
+    except (ValueError, TypeError):
+        ok = False
+    if not ok:
+        raise ValueError(f"{where}的{BASE_DATE_VAR}「{value}」不是日期, 写成 2026-10-23 这样")
+    return value
+
+
+_BASE_DATE_RE = re.compile(rf"(?<![\w.]){re.escape(BASE_DATE_VAR)}(?![\w.])")
+
+
+def mentions_base_date(texts: list[str]) -> bool:
+    """规则文本 (单元格 / 表达式 / 筛选) 里有没有引用 基准日期; 引号里的文字不算, 反引号包着的算。
+    名字边界和求值时的替换一致: 前后紧挨着字母汉字的 (如派生变量 基准日期前一年) 不是它。"""
+    found = False
+
+    def scan(seg: str) -> str:
+        nonlocal found
+        found = found or bool(_BASE_DATE_RE.search(seg.replace(f"`{BASE_DATE_VAR}`", BASE_DATE_VAR)))
+        return seg
+
+    for t in texts:
+        outside_strings(t, scan)
+    return found
+
+
 @dataclass
 class RawRule:
     """决策表里一条规则的原始格值 (相邻同 ID 的续行已合并成分支); 加载器从它构造 Rule, 导出器从它翻译成表达式。"""
@@ -720,9 +753,11 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
     output_names = expand_output_names([n for _, k, n in cols if k == "输出"], groups)
 
     tests: list[TestCase] = []
+    test_date = None
     if "测试" in wb.sheetnames:
         tgrid = _rows(wb["测试"])
-        tcols, _, tstart = _parse_header(tgrid, "测试", "用例", TEST_KINDS)
+        tcols, tkind, tstart = _parse_header(tgrid, "测试", "用例", TEST_KINDS)
+        test_date = _check_test_date(find_meta_value(tgrid, tkind, BASE_DATE_VAR), "「测试」sheet 表头上方")
         case_col = next(i for i, k, _ in tcols if k == "用例")
         t_inputs = [(i, n) for i, k, n in tcols if k == "输入"]
         t_expect = [(i, n) for i, k, n in tcols if k == "期望"]
@@ -752,6 +787,8 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
         source=path.name,
         variables=variables,
         field_groups=groups,
+        test_base_date=test_date,
+        uses_base_date=mentions_base_date(texts + [s.filter for s in inputs if s.filter]),
     )
     return _check_join_policy(rs), raw
 
@@ -815,11 +852,23 @@ def _check_yaml_keys(item: Any, allowed: tuple[str, ...], where: str) -> dict[st
     return item
 
 
+def _yaml_tests(spec: Any) -> tuple[list[Any], Any]:
+    """测试: 可以直接是用例列表, 也可以写成 {基准日期: ..., 用例: [...]} 给这组用例一个基准日期 (0.8.3)。"""
+    if isinstance(spec, dict):
+        _check_yaml_keys(spec, YAML_TESTS_KEYS, "YAML 测试:")
+        cases = spec.get("用例") or []
+        if not isinstance(cases, list):
+            raise ValueError("YAML 测试: 下的 用例: 要是一个列表, 每项写 用例 / 输入 / 期望")
+        return cases, _check_test_date(spec.get(BASE_DATE_VAR), "YAML 测试: 里")
+    return list(spec or []), None
+
+
 def load_yaml_rules(path: Path) -> RuleSet:
     doc = _check_yaml_keys(yaml.safe_load(path.read_text(encoding="utf-8")) or {}, YAML_TOP_KEYS, "YAML 顶层")
     for i, r in enumerate(doc.get("规则") or [], 1):
         _check_yaml_keys(r, YAML_RULE_KEYS, f"YAML 第 {i} 条规则")
-    for i, t in enumerate(doc.get("测试") or [], 1):
+    cases, test_date = _yaml_tests(doc.get("测试"))
+    for i, t in enumerate(cases, 1):
         _check_yaml_keys(t, YAML_TEST_KEYS, f"YAML 第 {i} 条测试用例")
     inputs, settings = _yaml_inputs(doc)
     settings = _merge_join_sep(settings, doc.get(JOIN_SEP_KEY), "YAML 顶层")
@@ -861,7 +910,7 @@ def load_yaml_rules(path: Path) -> RuleSet:
 
     tests: list[TestCase] = []
     allowed = _allowed_test_inputs(variables, derived, inputs, outputs)
-    for i, t in enumerate(doc.get("测试") or []):
+    for i, t in enumerate(cases):
         name = str(t.get("用例", f"T{i + 1}"))
         given = {str(k): v for k, v in (t.get("输入") or {}).items()}
         expected = {str(k): v for k, v in (t.get("期望") or {}).items()}
@@ -882,6 +931,8 @@ def load_yaml_rules(path: Path) -> RuleSet:
             source=path.name,
             variables=variables,
             field_groups=groups,
+            test_base_date=test_date,
+            uses_base_date=mentions_base_date(texts + [s.filter for s in inputs if s.filter]),
         )
     )
 

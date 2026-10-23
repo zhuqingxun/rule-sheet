@@ -1,7 +1,7 @@
 """Excel -> YAML 导出的无损性 (逐形态行为等价 + 三个样例端到端), 以及两份规则文件的语义比对。"""
 
 import shutil
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 import pytest
@@ -390,9 +390,10 @@ def test_field_groups_survive_both_directions_and_diff(tmp_path):
         ws.cell(4, names.index("会议记录") + 1).value == "上期"
         and ws.cell(5, names.index("会议记录") + 1).value is None
     )
-    tests_ws = wb["测试"]
+    tests_ws = wb["测试"]  # 第 1 行是 测试: 里的 基准日期 (元信息行), 列类型 / 列名在 2 / 3 行
+    assert tests_ws.cell(1, 1).value == "基准日期" and tests_ws.cell(1, 2).value.date() == date(2026, 10, 20)
     expects = [
-        tests_ws.cell(2, c).value for c in range(1, tests_ws.max_column + 1) if tests_ws.cell(1, c).value == "期望"
+        tests_ws.cell(3, c).value for c in range(1, tests_ws.max_column + 1) if tests_ws.cell(2, c).value == "期望"
     ]
     assert expects == ["例会时间", "类别-会议", "状态-会议", "例会结论", "备注", "待跟进事宜"]  # 期望列是展开后的逐列
     p = tmp_path / "g.yaml"
@@ -401,6 +402,11 @@ def test_field_groups_survive_both_directions_and_diff(tmp_path):
     )
     res = diff_rules(CARRY_EXCEL, p)
     assert any(d.startswith("字段组不同") for d in res.differences)
+    assert "测试:\n  基准日期: 2026-10-20\n  用例:\n  - 用例: T1" in text  # 「测试」sheet 表头上方的日期 (issue #31)
+    p.write_text(
+        CARRY_YAML.read_text(encoding="utf-8").replace("基准日期: 2026-10-20", "基准日期: 2026-10-21"), "utf-8"
+    )
+    assert "测试的基准日期: A 2026-10-20, B 2026-10-21" in diff_rules(CARRY_EXCEL, p).differences
     assert any("规则 R1 输出" in d and "上期.岗位名称" in d for d in res.differences)  # 展开后的逐列输出也跟着不同
 
 

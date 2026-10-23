@@ -92,7 +92,7 @@ def build_rules() -> None:
     # ---- sheet 1: 设置 (上方设置项; 空一行; 下方输入表) ---------------------------
     new_sheet(wb, "设置", [
         SETTINGS_TITLE,
-        ("基准日期", BASE, "本批例会日: 决策表里 =基准日期 就是它, 也是内嵌测试用的日期。每批跑的时候用 --var 基准日期=... 给真实的例会日"),
+        ("基准日期", None, "本批例会日: 决策表里 =基准日期 就是它。每批不同, 跑的时候给: --var 基准日期=2026-10-20 (Python: variables=); 这里留空, 没给就取运行当天。内嵌测试的日期写在「测试」sheet 表头上方, 与这里无关"),
         ("输出", "output/本期全量_更新后.xlsx", "默认输出路径, 相对本规则文件所在目录, 命令行 -o 可覆盖"),
         (None, None, None),
         INPUTS_TITLE,
@@ -134,7 +134,10 @@ def build_rules() -> None:
         ["T5", "是", "是", LAST, NOTICE, "03-按计划进行", "面谈通过", None,        "走审批",       "临时备注", BASE, NOTICE, "03-按计划进行", "面谈通过", "空",        "走审批",       "本期备注原来有值、上期为空: 整组带入会把它清成空 (期望格写 空)"],
         ["T6", "否", "是", None, NOTICE, "05-已关闭",    "已任命",   None,        None,          None,  None, None,   None,          None,      None,        None,          "不冒泡且上批已关闭: R3 的 != 05-已关闭 不成立, 不动"],
     ]
-    new_sheet(wb, "测试", [kinds, names, *tests])
+    new_sheet(wb, "测试", [
+        ["基准日期", BASE, "用例是按这个日期写的 (T1 / T2 / T5 期望的例会时间就是它), 只给内嵌测试用; 与「设置」和 --var 无关, 生产换批次日期不影响用例"],
+        kinds, names, *tests,
+    ])
 
     style_rules_workbook(wb)
     wb.save(ROOT / "规则_决策表.xlsx")

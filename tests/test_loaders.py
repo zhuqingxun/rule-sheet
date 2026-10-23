@@ -882,6 +882,96 @@ def test_input_prefixed_derived_is_a_variable_in_tests(tmp_path):
     assert [o.passed for o in run_tests(rs)] == [True, True]
 
 
+BD_RULE = [["规则ID", "输入", "输出"], ["规则ID", "主表.d", "标记"], ["R1", ">= 基准日期", "新"]]
+BD_CASES = [
+    ["用例", "输入", "期望"],
+    ["用例", "主表.d", "标记"],
+    ["T1", date(2026, 10, 20), "新"],
+    ["T2", date(2026, 10, 19), None],
+]
+BD_YAML = """输入:
+  主表: {文件: a.xlsx, 匹配: 主表}
+规则:
+  - 编号: R1
+    当: [主表.d >= 基准日期]
+    则: {标记: 新}
+测试:
+  基准日期: 2026-10-20
+  用例:
+    - 用例: T1
+      输入: {主表.d: 2026-10-20}
+      期望: {标记: 新}
+"""
+
+
+def test_test_sheet_base_date_owns_the_cases(tmp_path):
+    """issue #31: 用例的期望按固定日期写, 日期跟着用例走: 「测试」sheet 表头上方 > 「设置」(生产默认) > 当天;
+    用例自己的 基准日期 列仍优先。"""
+    from rule_sheet.engine import case_base_date, run_tests
+
+    tests = [["基准日期", "2026-10-20", "用例按它写"], *BD_CASES]
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", BD_RULE, tests, settings=[["基准日期", "2030-01-01"]]))
+    assert rs.test_base_date == "2026-10-20" and rs.uses_base_date
+    assert case_base_date(rs) == (pd.Timestamp("2026-10-20"), "测试的基准日期")
+    assert all(o.passed for o in run_tests(rs))  # 「设置」的 2030-01-01 是生产默认, 用例不看它
+    own = [
+        ["用例", "输入", "输入", "期望"],
+        ["用例", "主表.d", "基准日期", "标记"],
+        ["T1", date(2026, 10, 20), date(2026, 10, 25), None],  # 这条用例自己的日期: 10-20 < 10-25, 不命中
+    ]
+    rs = load_rules(make_workbook(tmp_path / "o.xlsx", BD_RULE, [["基准日期", date(2026, 10, 20)], *own]))
+    assert all(o.passed for o in run_tests(rs))
+    with pytest.raises(ValueError, match="「测试」sheet 表头上方的基准日期「下周一」不是日期"):
+        load_rules(make_workbook(tmp_path / "b.xlsx", BD_RULE, [["基准日期", "下周一"], *BD_CASES]))
+
+
+def test_cases_need_a_fixed_base_date_when_rules_use_it(tmp_path):
+    """规则引用了基准日期, 用例却哪里都没有固定的: 按当天算会今天过明天挂, 跑测试时报错; 「设置」有值的老文件照旧;
+    不引用基准日期的规则文件不受影响。"""
+    from rule_sheet.engine import run_tests
+
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", BD_RULE, BD_CASES))
+    with pytest.raises(ValueError, match="用例 T1, T2 没有固定的基准日期"):
+        run_tests(rs)
+    old = load_rules(make_workbook(tmp_path / "s.xlsx", BD_RULE, BD_CASES, settings=[["基准日期", "2026-10-20"]]))
+    assert all(o.passed for o in run_tests(old))
+    plain = load_rules(make_workbook(tmp_path / "p.xlsx", RULE, [*TEST_HEADER, ["T1", "x", None, "命中"]]))
+    assert not plain.uses_base_date and all(o.passed for o in run_tests(plain))
+
+
+def test_yaml_tests_with_base_date(tmp_path):
+    """YAML 测试: 写成 {基准日期, 用例: [...]}; 列表写法照旧; 键拼错 / 日期写错加载时报错。"""
+    from rule_sheet.engine import run_tests
+
+    p = tmp_path / "r.yaml"
+    p.write_text(BD_YAML, encoding="utf-8")
+    rs = load_rules(p)
+    assert rs.test_base_date == date(2026, 10, 20) and [t.name for t in rs.tests] == ["T1"]
+    assert all(o.passed for o in run_tests(rs))
+    for old, new, msg in [
+        ("  基准日期: 2026-10-20\n", "  基准日其: 2026-10-20\n", "YAML 测试: 里的「基准日其」不认识"),
+        ("基准日期: 2026-10-20", "基准日期: 下周", "YAML 测试: 里的基准日期「下周」不是日期"),
+        (BD_YAML[BD_YAML.index("  用例:\n") :], "  用例: T1\n", "用例: 要是一个列表"),
+    ]:
+        p.write_text(BD_YAML.replace(old, new), encoding="utf-8")
+        with pytest.raises(ValueError, match=msg):
+            load_rules(p)
+    head, cases = BD_YAML.split("  基准日期: 2026-10-20\n  用例:\n")
+    p.write_text(head + "\n".join(line[2:] for line in cases.splitlines()) + "\n", encoding="utf-8")
+    rs = load_rules(p)
+    assert rs.test_base_date is None and len(rs.tests) == 1
+    with pytest.raises(ValueError, match="没有固定的基准日期"):
+        run_tests(rs)
+
+
+def test_mentions_base_date_follows_name_boundaries():
+    from rule_sheet.loaders import mentions_base_date
+
+    assert mentions_base_date(["主表.d >= 基准日期"]) and mentions_base_date(["=基准日期"])
+    assert mentions_base_date(["天数差(基准日期, 主表.d)"]) and mentions_base_date(["`基准日期` - 1天"])
+    assert not mentions_base_date(['主表.x == "基准日期"', "基准日期前一年 > 1", "主表.基准日期", "包含 x"])
+
+
 def test_missing_file_and_missing_sheet(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_rules(tmp_path / "nope.xlsx")

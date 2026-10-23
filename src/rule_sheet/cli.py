@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import __version__
 from .convert import diff_rules, export_workbook
-from .engine import RunResult, TestOutcome, run, run_tests
+from .engine import RunResult, TestOutcome, case_base_date, run, run_tests
 from .loaders import load_rules
 from .style import format_workbook
 
@@ -97,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="名称=值",
-        help="运行时给变量的值 (可重复; 目前只认 基准日期), 覆盖规则文件「设置」的同名项; 内嵌测试仍用规则文件的值",
+        help="运行时给变量的值 (可重复; 目前只认 基准日期), 覆盖规则文件「设置」的同名项; 只作用于真实数据, "
+        "内嵌测试用「测试」sheet 表头上方 (没有就用「设置」) 的",
     )
     p_run.add_argument("--base-dir", type=Path, help="规则文件内相对路径的基准目录 (默认: 规则文件所在目录)")
     p_run.add_argument("--ignore-tests", action="store_true", help="内嵌测试失败也继续")
@@ -156,6 +157,9 @@ def main(argv: list[str] | None = None) -> int:
                 print("规则文件没有测试用例 (Excel 加「测试」sheet / YAML 加 测试:), 什么都没验证")
                 return 1
             outcomes = run_tests(rs)
+            if rs.uses_base_date:
+                day, source = case_base_date(rs)
+                print(f"用例的基准日期 = {day.date()} ({source}; 用例自己填了 基准日期 列的按它自己的)")
             _print_tests(outcomes)
             return 0 if all(o.passed for o in outcomes) else 1
         res = run(

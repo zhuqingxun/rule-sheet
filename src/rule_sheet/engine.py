@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from .conditions import ns_index, resolve_output, to_mask
-from .expressions import eval_expr, is_na, text_of, values_equal
+from .expressions import eval_expr, is_blank, is_na, text_of, values_equal
 from .loaders import load_rules
 from .model import (
     BASE_DATE_VAR,
@@ -232,7 +232,7 @@ def resolve_base_date(rs: RuleSet, variables: dict[str, Any] | None = None) -> t
     """真实数据用的基准日期与来源: 运行时给的 (variables) 优先, 其次规则文件「设置」, 都没有取运行当天。
 
     variables 的键只认 RUNTIME_VARS: 拼错的名字静默不生效会让结果悄悄用回规则文件里的值, 所以报错。
-    内嵌测试不走这里 (case_namespace 用规则文件的值), 用例里的日期是按它写的。"""
+    内嵌测试走 case_base_date (测试的基准日期 > 「设置」), 不吃 variables: 用例里的日期是按固定日期写的。"""
     variables = dict(variables or {})
     unknown = [k for k in variables if k not in RUNTIME_VARS]
     if unknown:
@@ -558,7 +558,7 @@ def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.S
             val = pd.Timestamp(val)
         dtype = object if isinstance(val, str) or val is None else None
         ns[name] = pd.Series([val], index=index, dtype=dtype)
-    ns.setdefault(BASE_DATE_VAR, resolve_base_date(rs)[0])  # 不传 variables: 用例永远按规则文件里的基准日期
+    ns.setdefault(BASE_DATE_VAR, case_base_date(rs)[0])  # 用例自己没给: 按测试的 / 「设置」的, 永远不吃 variables
     # 主表的 .存在 没给默认 是 (普通行); 要测追加来的行就写 否
     ns.setdefault(f"{rs.primary.name}.{EXIST_VAR}", pd.Series([True], index=index))
     for name in rs.variables:  # 用例没提到的变量 = 空值
@@ -572,7 +572,29 @@ def case_namespace(rs: RuleSet, tc: TestCase) -> tuple[Namespace, dict[str, pd.S
     return ns, originals
 
 
+def case_base_date(rs: RuleSet) -> tuple[pd.Timestamp, str]:
+    """内嵌用例的基准日期与来源 (用例自己有 基准日期 列的不走这里): 「测试」sheet / YAML 测试: 写的优先, 其次「设置」,
+    都没有取运行当天。不接 variables: 用例的期望是按固定日期写的, 换成批次日期就错了 (issue #31)。"""
+    if rs.test_base_date is not None:
+        return pd.Timestamp(rs.test_base_date), "测试的基准日期"
+    return resolve_base_date(rs)
+
+
+def _check_case_dates(rs: RuleSet) -> None:
+    """规则用到基准日期、用例却没有固定的基准日期: 按运行当天算, 今天过、明天就可能不过, 先报错。"""
+    if not rs.uses_base_date or rs.test_base_date is not None or rs.settings.get(BASE_DATE_VAR):
+        return
+    loose = [tc.name for tc in rs.tests if is_blank(tc.inputs.get(BASE_DATE_VAR))]
+    if loose:
+        raise ValueError(
+            f"规则引用了{BASE_DATE_VAR}, 但用例 {', '.join(loose)} 没有固定的{BASE_DATE_VAR} (会按运行当天算, "
+            f"今天通过、换一天可能就不通过); 在「测试」sheet 表头上方写一行 {BASE_DATE_VAR} | 2026-10-23 "
+            f"(YAML: 测试: {{{BASE_DATE_VAR}: 2026-10-23, 用例: [...]}}), 或给这几条用例填 {BASE_DATE_VAR} 列"
+        )
+
+
 def run_tests(rs: RuleSet) -> list[TestOutcome]:
+    _check_case_dates(rs)
     outcomes: list[TestOutcome] = []
     for tc in rs.tests:
         ns, originals = case_namespace(rs, tc)

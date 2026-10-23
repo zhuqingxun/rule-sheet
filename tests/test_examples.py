@@ -1,5 +1,7 @@
 """端到端: 自带样例在两种前端下结果一致, 且与设计表一致。"""
 
+from datetime import date
+
 import pandas as pd
 import pytest
 from openpyxl import load_workbook
@@ -278,7 +280,8 @@ def test_carry_field_groups_expand_at_load(rules_file):
 
 @CARRY_FRONTENDS
 def test_carry_real_data_copies_whole_group(rules_file, tmp_path):
-    res = run(rules_file, output=tmp_path / "out.xlsx")
+    # 本批例会日不写在「设置」里, 像生产那样运行时给 (issue #31)
+    res = run(rules_file, output=tmp_path / "out.xlsx", variables={"基准日期": "2026-10-20"})
     assert not res.stopped_by_tests and res.out is not None
     assert dict(zip(res.out["岗位编码"], res.out["命中规则"], strict=True)) == CARRY_HITS
     row = res.out.set_index("岗位编码")
@@ -309,7 +312,8 @@ def test_carry_frontends_agree(tmp_path):
 
 @CARRY_FRONTENDS
 def test_runtime_base_date_overrides_settings_for_real_data_only(rules_file, tmp_path):
-    """issue #28: variables= 覆盖「设置」里的基准日期; 内嵌用例仍按规则文件的 2026-10-20 写, 照样通过。"""
+    """issue #28 / #31: variables= 给真实数据的基准日期; 内嵌用例按「测试」sheet 表头上方的 2026-10-20 写, 照样通过。
+    carry-forward 的「设置」不写基准日期: 不给就取运行当天, 用例仍用测试的日期, 不随运行日期漂。"""
     res = run(rules_file, output=tmp_path / "out.xlsx", variables={"基准日期": "2026-11-30"})
     assert not res.stopped_by_tests and res.tests_passed == len(res.tests) > 0
     row = res.out.set_index("岗位编码")
@@ -317,7 +321,8 @@ def test_runtime_base_date_overrides_settings_for_real_data_only(rules_file, tmp
     assert row.loc["K003", "例会时间"] == pd.Timestamp("2026-09-20")  # 上批带入的不受影响
     assert "基准日期 = 2026-11-30 (运行时给定)" in res.notes
     plain = run(rules_file, dry_run=True)
-    assert "基准日期 = 2026-10-20 (规则文件「设置」)" in plain.notes  # 没给就用规则文件的, 并说一声
+    assert f"基准日期 = {date.today()} (规则文件没设, 取运行当天)" in plain.notes  # 没给就取当天, 并说一声
+    assert not plain.stopped_by_tests and plain.tests_passed == len(plain.tests)  # 用例不受影响
 
 
 def test_runtime_variables_reject_unknown_names_and_bad_dates(tmp_path):

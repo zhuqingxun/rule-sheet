@@ -305,7 +305,10 @@ def excel_to_yaml_doc(path: str | Path) -> tuple[dict[str, Any], RuleSet]:
         doc[JOIN_SEP_KEY] = _plain(rs.settings[JOIN_SEP_KEY])
     doc["规则"] = [_rule_doc(tr, r) for r in raw]  # 输出格取原文: 字段组名下的格保持 组名: 输入名 的形态
     if rs.tests:
-        doc["测试"] = [{"用例": t.name, "输入": _given(t.inputs), "期望": _given(t.expected)} for t in rs.tests]
+        cases = [{"用例": t.name, "输入": _given(t.inputs), "期望": _given(t.expected)} for t in rs.tests]
+        # 「测试」sheet 表头上方写了基准日期 -> 测试: {基准日期, 用例}; 没写保持列表形态
+        has_date = rs.test_base_date is not None
+        doc["测试"] = {BASE_DATE_VAR: _plain(rs.test_base_date), "用例": cases} if has_date else cases
     return doc, rs
 
 
@@ -713,6 +716,8 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
         for t in rs.tests:
             keys.extend(k for k in t.inputs if k not in keys)
         ws = wb.create_sheet("测试")
+        if rs.test_base_date is not None:  # 表头上方的元信息行, 与决策表的 命中策略 同一种写法
+            ws.append([BASE_DATE_VAR, _excel_value(rs.test_base_date)])
         ws.append(["用例", *["输入"] * len(keys), *["期望"] * len(rs.outputs), "说明"])
         ws.append(["用例", *keys, *rs.outputs, "说明"])
         for t in rs.tests:
@@ -788,6 +793,9 @@ def _structure_diff(a: RuleSet, b: RuleSet, res: DiffResult) -> None:
         va, vb = _norm_cell(a.settings.get(k)), _norm_cell(b.settings.get(k))
         if va != vb:
             (res.notes if k == "输出" else res.differences).append(f"设置「{k}」: A {va}, B {vb}")
+    ta_date, tb_date = _norm_cell(a.test_base_date), _norm_cell(b.test_base_date)
+    if ta_date != tb_date:
+        res.differences.append(f"测试的{BASE_DATE_VAR}: A {ta_date}, B {tb_date}")
     if a.derived != b.derived:
         res.differences.append(f"变量定义不同: A {a.derived}, B {b.derived}")
     if a.field_groups != b.field_groups:

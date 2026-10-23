@@ -27,7 +27,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .loaders import POLICY_LABEL, RULE_KINDS, TEST_KINDS, _parse_header, _rows, input_header_row, load_rules
-from .model import FIELD_GROUP_KEY, JOIN_SEP_KEY, LEGACY_INPUTS_SHEET, SETTING_KEYS, SETTINGS_SHEET
+from .model import BASE_DATE_VAR, FIELD_GROUP_KEY, JOIN_SEP_KEY, LEGACY_INPUTS_SHEET, SETTING_KEYS, SETTINGS_SHEET
 
 # ---------------------------------------------------------------------------
 # 规范常量
@@ -217,8 +217,8 @@ def _last_row(ws: Worksheet) -> int:
 
 
 def _meta_label(value: Any) -> bool:
-    """决策表元信息行的标签格 (命中策略 / 拼接分隔符, 可带冒号)。"""
-    return str(value or "").strip().rstrip(":：") in (POLICY_LABEL, JOIN_SEP_KEY)
+    """决策表 / 测试表头上方元信息行的标签格 (命中策略 / 拼接分隔符 / 测试的基准日期, 可带冒号)。"""
+    return str(value or "").strip().rstrip(":：") in (POLICY_LABEL, JOIN_SEP_KEY, BASE_DATE_VAR)
 
 
 def _span_note(ws: Worksheet, row: int, start: int, end: int) -> int:
@@ -273,6 +273,7 @@ def style_rule_table(ws: Worksheet, key_kind: str, allowed: tuple[str, ...]) -> 
                 _style_cell(cell, bold=True)
             elif label is not None and c == label + 1:
                 _style_cell(cell, bold=False)
+                _fix_value_format(cell)  # 测试的基准日期是日期格
             else:
                 _style_cell(cell, bold=False, color=FILLS[NOTE])
         rest = [c for c in filled if label is not None and c > label + 1]

@@ -150,6 +150,10 @@ class RuleSet:
     # 字段组: 组名 -> 列名清单。加载时已把规则里写在组名下的输出格展开成逐列 (Rule.outputs 里没有组名),
     # 这里留着给导出 / 比对 / 运行时「组名与真实列撞名」的检查用
     field_groups: dict[str, list[str]] = field(default_factory=dict)
+    # 内嵌用例的基准日期 (0.8.3, issue #31): 「测试」sheet 表头上方 / YAML 测试: {基准日期, 用例}; 用例的期望是按它写的,
+    # 所以跟着用例走, 不跟「设置」(生产默认) 也不跟 --var。用例自己的 基准日期 列仍优先
+    test_base_date: Any = None
+    uses_base_date: bool = False  # 规则 / 变量定义 / 筛选里引用了 基准日期: 用例没有固定的基准日期就报错
 
     @property
     def primary(self) -> InputSpec:
