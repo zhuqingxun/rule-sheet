@@ -4,6 +4,7 @@ from datetime import date, datetime
 
 import pandas as pd
 import pytest
+from openpyxl import load_workbook
 
 from rule_sheet.conditions import build_condition
 from rule_sheet.loaders import load_rules, load_yaml_rules
@@ -145,37 +146,112 @@ def test_join_policy_validation(tmp_path):
     with pytest.raises(ValueError, match="规则 R1 输出「标记」= 清空: 命中策略 多条拼接 只拼接有值的输出"):
         load_rules(make_workbook(tmp_path / "a.xlsx", [["命中策略", "多条拼接"], *cleared]))
     with pytest.raises(ValueError, match="设置了「拼接分隔符」, 但命中策略是「优先级」"):
-        load_rules(make_workbook(tmp_path / "b.xlsx", RULE, settings=[["拼接分隔符", ";"]]))
-    ok = make_workbook(tmp_path / "c.xlsx", [["命中策略", "多条拼接"], *RULE], settings=[["拼接分隔符", ";"]])
+        load_rules(make_workbook(tmp_path / "b.xlsx", [["拼接分隔符", ";"], *RULE]))
+    ok = make_workbook(tmp_path / "c.xlsx", [["命中策略", "多条拼接"], ["拼接分隔符", ";"], *RULE])
     rs = load_rules(ok)
     assert rs.hit_policy == "多条拼接" and rs.settings["拼接分隔符"] == ";"
     p = tmp_path / "r.yaml"
     p.write_text("命中策略: 多条拼接\n规则:\n  - 编号: A\n    则: {y: =空}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="规则 A 输出「y」= =空: 命中策略 多条拼接"):
         load_yaml_rules(p)
-    p.write_text("设置: {拼接分隔符: '/'}\n规则:\n  - 则: {y: 1}\n", encoding="utf-8")
+    p.write_text("拼接分隔符: '/'\n规则:\n  - 则: {y: 1}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="设置了「拼接分隔符」"):
         load_yaml_rules(p)
+
+
+def test_join_sep_lives_next_to_hit_policy(tmp_path):
+    """0.8: 拼接分隔符 写在决策表左上角 (YAML 顶层), 与命中策略放一起; 旧写法 (「输入」sheet 版式的「设置」/ YAML 设置:)
+    仍认一个版本; 两处都写报错; 新版「设置」里写它报错指路; 值留空时不把右边的说明当成分隔符。"""
+    join = [["命中策略", "多条拼接"], ["拼接分隔符", " | "], *RULE]
+    assert load_rules(make_workbook(tmp_path / "a.xlsx", join)).settings["拼接分隔符"] == " | "  # 不 strip
+    blank = [["命中策略", "多条拼接"], ["拼接分隔符", None, "留空 = /"], *RULE]
+    assert "拼接分隔符" not in load_rules(make_workbook(tmp_path / "b.xlsx", blank)).settings
+    old = make_workbook(tmp_path / "c.xlsx", join[:1] + RULE, settings=[["拼接分隔符", ";"]], legacy=True)
+    assert load_rules(old).settings["拼接分隔符"] == ";"
+    both = make_workbook(tmp_path / "d.xlsx", join, settings=[["拼接分隔符", ";"]], legacy=True)
+    with pytest.raises(ValueError, match="「拼接分隔符」写了两处"):
+        load_rules(both)
+    misplaced = make_workbook(tmp_path / "e.xlsx", join[:1] + RULE, settings=[["拼接分隔符", ";"]])
+    with pytest.raises(ValueError, match="「设置」sheet: 「拼接分隔符」写在决策表左上角「命中策略」下面一行"):
+        load_rules(misplaced)
+    p = tmp_path / "r.yaml"
+    base = "输入: {主表: {匹配: 主表}}\n命中策略: 多条拼接\n规则:\n  - 则: {y: 1}\n"
+    p.write_text(base + "拼接分隔符: ';'\n", encoding="utf-8")
+    assert load_rules(p).settings["拼接分隔符"] == ";"
+    p.write_text(base + "设置: {拼接分隔符: ';'}\n", encoding="utf-8")  # 0.7 写法
+    assert load_rules(p).settings["拼接分隔符"] == ";"
+    p.write_text(base + "设置: {拼接分隔符: ';'}\n拼接分隔符: '/'\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="写了两处 \\(YAML 顶层 和「设置」\\)"):
+        load_rules(p)
+
+
+def test_settings_sheet_holds_settings_and_inputs(tmp_path):
+    """0.8: 「设置」上方设置项 (标签 / 值 / 说明, 标题行与没填值的行跳过), 下方输入表 (按「名称」「匹配」那一行定位);
+    旧版「输入」sheet 仍认; 两处都有输入表报错; 都没有报错指路。"""
+    from openpyxl import Workbook
+
+    settings = [["本规则的设置"], ["基准日期", "2026-10-19", "说明: 测试用"], ["输出", "o.xlsx"], ["备注", None, "x"]]
+    rs = load_rules(make_workbook(tmp_path / "a.xlsx", RULE, settings=settings))
+    assert rs.settings == {"基准日期": "2026-10-19", "输出": "o.xlsx"} and rs.names == ["主表", "本月"]
+    legacy = load_rules(make_workbook(tmp_path / "b.xlsx", RULE, settings=settings[1:3], legacy=True))
+    assert legacy.settings == rs.settings and legacy.names == rs.names
+    wb = load_workbook(make_workbook(tmp_path / "d.xlsx", RULE))
+    ws = wb.create_sheet("输入")
+    for row in INPUTS:
+        ws.append(row)
+    wb.save(tmp_path / "d.xlsx")
+    with pytest.raises(ValueError, match="「设置」sheet 里已经有输入表, 又有「输入」sheet"):
+        load_rules(tmp_path / "d.xlsx")
+    wb = Workbook()
+    wb.active.title = "设置"
+    wb.active.append(["基准日期", "2026-10-19"])
+    ws = wb.create_sheet("决策表")
+    for row in RULE:
+        ws.append(row)
+    wb.save(tmp_path / "e.xlsx")
+    with pytest.raises(ValueError, match="规则文件缺少输入表: 「设置」sheet里要有一行写列名 名称 / 匹配"):
+        load_rules(tmp_path / "e.xlsx")
 
 
 INPUTS = [["名称", "匹配", "文件"], ["主表", "主表", "a.xlsx"], ["本月", "k", "b.xlsx"]]
 
 
 def make_workbook(
-    path, decision, tests=None, derived=None, merges=(), inputs=None, settings=None, groups=None, groups_header=None
+    path,
+    decision,
+    tests=None,
+    derived=None,
+    merges=(),
+    inputs=None,
+    settings=None,
+    groups=None,
+    groups_header=None,
+    legacy=False,
 ):
-    """最小规则工作簿: decision / tests / inputs 是整张 sheet 的行 (含表头), groups 不含表头, merges 是要合并的区域。"""
+    """最小规则工作簿: decision / tests / inputs 是整张 sheet 的行 (含表头), groups 不含表头, merges 是要合并的区域。
+
+    默认 0.8 版式: 「设置」上方设置项行、空一行、下方输入表;
+    legacy=True 是 0.7 的「输入」sheet + 只有设置项的「设置」。"""
     from openpyxl import Workbook
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "输入"
-    for row in inputs or INPUTS:
-        ws.append(row)
-    if settings:
-        ws = wb.create_sheet("设置")
-        ws.append(["设置项", "值"])
-        for row in settings:
+    if legacy:
+        ws.title = "输入"
+        for row in inputs or INPUTS:
+            ws.append(row)
+        if settings:
+            ws = wb.create_sheet("设置")
+            ws.append(["设置项", "值"])
+            for row in settings:
+                ws.append(row)
+    else:
+        ws.title = "设置"
+        for row in settings or []:
+            ws.append(row)
+        if settings:
+            ws.append([])
+        for row in inputs or INPUTS:
             ws.append(row)
     if derived:
         ws = wb.create_sheet("变量定义")
@@ -511,10 +587,14 @@ def test_field_group_errors(tmp_path, groups, header, decision, msg):
 
 def test_field_group_copy_is_fine_under_join_policy(tmp_path):
     """多条拼接 只拦 清空; 字段组写输入名展开成的 上期.x 逐列参与拼接, 和手写六列一样。"""
-    decision = [["命中策略", "多条拼接"], *GROUP_DECISION[:2], ["R1", "x", "本月", "-"], ["R2", "x", "-", "附加"]]
-    rs = load_rules(
-        make_workbook(tmp_path / "r.xlsx", decision, groups=[["带入", "x, y"]], settings=[["拼接分隔符", ";"]])
-    )
+    decision = [
+        ["命中策略", "多条拼接"],
+        ["拼接分隔符", ";"],
+        *GROUP_DECISION[:2],
+        ["R1", "x", "本月", "-"],
+        ["R2", "x", "-", "附加"],
+    ]
+    rs = load_rules(make_workbook(tmp_path / "r.xlsx", decision, groups=[["带入", "x, y"]]))
     assert rs.hit_policy == "多条拼接" and [r.outputs for r in rs.rules] == [
         {"x": "本月.x", "y": "本月.y"},
         {"y": "附加"},
@@ -568,13 +648,18 @@ def test_single_input_may_omit_primary_word(tmp_path):
         ([["名称", "匹配"], ["主表", "主表"], ["主表", "k"]], "输入名「主表」重复"),
         ([["名称", "匹配", "重复键"], ["主表", "主表", None], ["本月", "k", "去重"]], "「重复键」只认 取第一条 / 报错"),
         ([["名称", "匹配"], ["主表", "主表"], ["本月", "k"], ["花名册", "工号 = 本月.工号"]], "只能对齐到主表「主表」"),
-        ([["名字", "匹配"], ["主表", "主表"]], "第 1 行缺少「名称」列"),
+        ([["名字", "匹配"], ["主表", "主表"]], "缺少输入表: 「设置」sheet里要有一行写列名 名称 / 匹配"),
         ([["名称", "匹配"]], "没有声明任何输入"),
     ],
 )
 def test_excel_inputs_errors(tmp_path, inputs, msg):
     with pytest.raises(ValueError, match=msg):
         load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=inputs))
+
+
+def test_legacy_inputs_sheet_header_must_be_row_1(tmp_path):
+    with pytest.raises(ValueError, match="「输入」sheet 第 1 行缺少「名称」列"):
+        load_rules(make_workbook(tmp_path / "r.xlsx", RULE, inputs=[["名字", "匹配"], ["主表", "主表"]], legacy=True))
 
 
 def test_settings_sheet_rejects_unknown_keys(tmp_path):
@@ -778,7 +863,7 @@ def test_missing_file_and_missing_sheet(tmp_path):
     wb = Workbook()
     wb.active.title = "决策表"
     wb.save(tmp_path / "bad.xlsx")
-    with pytest.raises(ValueError, match="缺少「输入」sheet"):
+    with pytest.raises(ValueError, match="缺少输入表"):
         load_rules(tmp_path / "bad.xlsx")
     wb = Workbook()
     wb.active.title = "随便"

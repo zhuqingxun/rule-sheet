@@ -24,7 +24,11 @@ CONCAT_OPTS = ("排序", "分隔符", "空值占位", "带序号")  # 输入声�
 APPEND_KEY = "独有行"  # 输入声明: 参照表里主表没有的行怎么办: 忽略 (默认) / 追加 (并入输出的行集末尾, 0.7, issue #19)
 APPEND_WORDS = {"忽略": False, "追加": True}
 PRIMARY_WORD = "主表"  # 「输入」里主表那一行的「匹配」写它: 输出的行就是主表的行, 其它输入都对齐到它
-SETTING_KEYS = ("基准日期", "输出", JOIN_SEP_KEY)
+# 「设置」sheet 上方 / YAML 设置: 认的项。拼接分隔符 0.8 起写在决策表左上角 (YAML 顶层), 与命中策略放一起;
+# 旧版「设置」里的拼接分隔符仍认 (保留一个版本)
+SETTING_KEYS = ("基准日期", "输出")
+SETTINGS_SHEET = "设置"  # 0.8 起: 上方几行设置项, 下方是输入表 (原「输入」sheet)
+LEGACY_INPUTS_SHEET = "输入"  # 0.7 以前单独的输入表 sheet, 保留一个版本
 FIELD_GROUP_KEY = "字段组"  # Excel sheet 名 / YAML 顶层键: 给一组列起个名字, 决策表里一格就能整组复制 / 清空
 EXIST_VAR = "存在"  # 参照表是否匹配到, 实际变量名是 <输入名>.存在
 BASE_DATE_VAR = "基准日期"

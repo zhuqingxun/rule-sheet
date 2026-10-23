@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
 from rule_sheet import cli
-from rule_sheet.loaders import load_rules
+from rule_sheet.loaders import _rows, input_header_row, load_rules
 from rule_sheet.style import FILLS, HEADER_FILL, ID_KINDS, KV_WIDTH_BOUNDS, WIDTH_BOUNDS, display_width, format_workbook
 
 from .conftest import CAND_EXCEL, CARRY_EXCEL, DIFF_EXCEL, EXCEL_RULES, STATUS_EXCEL, TAGS_EXCEL, YAML_RULES
@@ -64,18 +64,29 @@ def test_sample_workbooks_follow_the_spec(path):
                     assert cell.data_type == "s" and cell.number_format == "@", (sheet, cell.coordinate)
     ws = wb["决策表"]
     assert ws.cell(1, 1).value == "命中策略" and ws.cell(1, 1).font.bold and color(ws.cell(1, 3)) == FILLS["说明"]
-    kv_sheets = [s for s in ("输入", "设置", "变量定义", "字段组") if s in wb.sheetnames]
-    assert len(kv_sheets) >= 2  # 设置 / 变量定义 / 字段组 都是可选的, 但每个样例至少有一个
-    for sheet in kv_sheets:
+    assert wb.sheetnames[0] == "设置" and "输入" not in wb.sheetnames  # 0.8: 输入表在「设置」里
+    settings = wb["设置"]
+    top = input_header_row(_rows(settings)) + 1  # 输入表列名行 (1 起); 之上是设置项行
+    for r in range(1, top):
+        if settings.cell(r, 1).value is not None:
+            assert settings.cell(r, 1).font.bold and color(settings.cell(r, 1)) is None
+        if settings.cell(r, 3).value is not None:
+            assert color(settings.cell(r, 3)) == FILLS["说明"]
+    kv_sheets = [(s, top if s == "设置" else 1) for s in ("设置", "变量定义", "字段组") if s in wb.sheetnames]
+    assert len(kv_sheets) >= 2  # 变量定义 / 字段组 都是可选的, 但每个样例至少有一个
+    for sheet, head in kv_sheets:
         ws = wb[sheet]
-        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
-        assert all(color(ws.cell(1, c)) == HEADER_FILL and ws.cell(1, c).font.bold for c in range(1, len(header) + 1))
+        header = [ws.cell(head, c).value for c in range(1, ws.max_column + 1)]
+        header = header[: max(i for i, h in enumerate(header, 1) if h)]
+        assert all(
+            color(ws.cell(head, c)) == HEADER_FILL and ws.cell(head, c).font.bold for c in range(1, len(header) + 1)
+        )
         note = header.index("说明") + 1
-        assert color(ws.cell(2, note)) == FILLS["说明"] and ws.cell(2, 1).font.bold
+        assert color(ws.cell(head + 1, note)) == FILLS["说明"] and ws.cell(head + 1, 1).font.bold
         for c, name in enumerate(header, start=1):
             lo, hi = KV_WIDTH_BOUNDS[name]
             assert lo <= width(ws, c) <= hi, (sheet, name)
-        assert ws.freeze_panes == "A2"
+        assert ws.freeze_panes == f"A{head + 1}"
 
 
 def test_long_cells_wrap_and_rows_grow():
@@ -159,7 +170,10 @@ def test_format_applies_spec_to_a_plain_workbook(tmp_path):
     assert color(ws.cell(2, 5)) == FILLS["输出"] and color(ws.cell(4, 1)) is None
     assert ws.freeze_panes == "C4" and ws.cell(1, 1).font.bold
     assert wb["测试"].freeze_panes == "B3"
-    assert color(wb["输入"].cell(1, 1)) == HEADER_FILL and wb["变量定义"].cell(2, 1).font.bold
+    settings = wb["设置"]  # 第 1 行设置项, 空一行, 第 3 行起输入表
+    assert settings.cell(1, 1).font.bold and color(settings.cell(1, 1)) is None
+    assert color(settings.cell(3, 1)) == HEADER_FILL and settings.freeze_panes == "A4"
+    assert wb["变量定义"].cell(2, 1).font.bold
     assert WIDTH_BOUNDS["输入"][0] <= width(ws, 3) <= WIDTH_BOUNDS["输入"][1]
 
 

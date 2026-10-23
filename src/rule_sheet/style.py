@@ -4,7 +4,8 @@
 - 列类型配色: 输入 浅蓝 / 输出 与 期望 浅绿 / 说明 浅黄 / 规则ID 优先级 用例 浅灰 (只在表头); 键值 sheet 表头 灰
 - 表头加粗; 表区域细灰边框; 垂直居中; 输入 与 ID 类列水平居中, 输出 / 说明 左对齐
 - 列宽按内容算 (中文算 2 个字符宽), 每类列有上下限; 超过上限的格换行, 行高按行数估算后显式写入
-- 冻结: 决策表 / 测试 冻结到列名行之下、最左边连续 ID 类列之右; 其它 sheet 冻结首行
+- 冻结: 决策表 / 测试 冻结到列名行之下、最左边连续 ID 类列之右; 「设置」冻结到输入表列名之下; 其它 sheet 冻结首行
+- 元信息行 (决策表的 命中策略 / 拼接分隔符, 「设置」的设置项): 标签加粗, 说明浅黄且不参与定宽
 - 以 = 开头的格按文本存 (否则 Excel 当成公式, 显示 #NAME?); 日期格 yyyy-mm-dd
 表头在哪一行由 loaders 的同一套逻辑判断, 所以 format 与加载器对「哪里是表头」永远一个答案。
 """
@@ -22,7 +23,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .loaders import POLICY_LABEL, RULE_KINDS, TEST_KINDS, _parse_header, _rows, load_rules
+from .loaders import POLICY_LABEL, RULE_KINDS, TEST_KINDS, _parse_header, _rows, input_header_row, load_rules
+from .model import JOIN_SEP_KEY, SETTINGS_SHEET
 
 # ---------------------------------------------------------------------------
 # 规范常量
@@ -51,7 +53,7 @@ WIDTH_BOUNDS = {
     "期望": (10, 28),
     NOTE: (24, 60),
 }
-# 键值 sheet (输入 / 设置 / 变量定义 / 旧 匹配设置) 按列名定宽度区间
+# 键值 sheet (「设置」的输入表 / 变量定义 / 字段组 / 旧 输入 / 旧 匹配设置) 按列名定宽度区间
 KV_WIDTH_BOUNDS = {
     "名称": (10, 16),
     "匹配": (10, 28),
@@ -200,7 +202,7 @@ def style_rule_table(ws: Worksheet, key_kind: str, allowed: tuple[str, ...]) -> 
             cell = ws.cell(row=r, column=c)
             if cell.value in (None, ""):
                 continue
-            label = str(cell.value).strip().rstrip(":：") == POLICY_LABEL or c == 1
+            label = str(cell.value).strip().rstrip(":：") in (POLICY_LABEL, JOIN_SEP_KEY) or c == 1
             _style_cell(cell, bold=label, color=None if label else FILLS[NOTE])
     for r in header_rows:
         for c in range(1, ncols + 1):
@@ -225,26 +227,50 @@ def style_rule_table(ws: Worksheet, key_kind: str, allowed: tuple[str, ...]) -> 
     ws.freeze_panes = f"{get_column_letter(frozen + 1)}{body_start + 1}"
 
 
-def style_kv_sheet(ws: Worksheet) -> None:
-    """输入 / 设置 / 变量定义 / 字段组 / 旧 匹配设置: 第 1 行表头, A 列加粗, 「说明」列浅黄。"""
+def style_kv_sheet(ws: Worksheet, header_row: int = 1) -> None:
+    """变量定义 / 字段组 / 旧 输入 / 旧 匹配设置 / 「设置」的输入表: header_row 行是表头, A 列加粗, 「说明」列浅黄。"""
     last = _last_row(ws)
-    if last == 0:
+    if last < header_row:
         return
-    header = [cell_text(v).strip() for v in _rows(ws)[0]]
+    header = [cell_text(v).strip() for v in _rows(ws)[header_row - 1]]
     ncols = max((i + 1 for i, h in enumerate(header) if h), default=0)
     if ncols == 0:
         return
     for c in range(1, ncols + 1):
-        _style_cell(ws.cell(row=1, column=c), bold=True, color=HEADER_FILL, horizontal="center")
-    for r in range(2, last + 1):
+        _style_cell(ws.cell(row=header_row, column=c), bold=True, color=HEADER_FILL, horizontal="center")
+    body = range(header_row + 1, last + 1)
+    for r in body:
         for c in range(1, ncols + 1):
             cell = ws.cell(row=r, column=c)
             is_note = header[c - 1] == NOTE
             _style_cell(cell, bold=(c == 1), color=FILLS[NOTE] if is_note else None)
             _fix_value_format(cell)
     columns = {c: KV_WIDTH_BOUNDS.get(header[c - 1], DEFAULT_BOUNDS) for c in range(1, ncols + 1)}
-    _set_widths_and_wrap(ws, columns, range(1, last + 1), wrap_rows=range(2, last + 1))
-    ws.freeze_panes = "A2"
+    _set_widths_and_wrap(ws, columns, range(header_row, last + 1), wrap_rows=body)
+    ws.freeze_panes = f"A{header_row + 1}"
+
+
+def style_settings_sheet(ws: Worksheet) -> None:
+    """「设置」: 上方设置项行 (设置项加粗 / 值 / 说明浅黄, 说明不参与定宽, 溢出到右边), 下方输入表按键值 sheet 的版式;
+    冻结到输入表列名之下。没有输入表的是旧版只有设置项的「设置」, 按第 1 行表头的键值 sheet 处理。"""
+    grid = _rows(ws)
+    header = input_header_row(grid)
+    if header is None:
+        style_kv_sheet(ws)
+        return
+    for r in range(1, header + 1):  # 与 loaders.read_setting_rows 同一读法: 第一个有字的格是设置项, 紧挨着的是值
+        cells = [c for c in range(1, len(grid[r - 1]) + 1) if ws.cell(row=r, column=c).value not in (None, "")]
+        for c in cells:
+            cell = ws.cell(row=r, column=c)
+            _style_cell(cell, bold=(c == cells[0]), color=FILLS[NOTE] if c > cells[0] + 1 else None)
+            _fix_value_format(cell)
+    style_kv_sheet(ws, header_row=header + 1)
+    for c in (1, 2):  # 设置项与值要显示全: 在输入表算出的宽度上按它们再放宽 (仍在该列的区间内)
+        name = cell_text(ws.cell(row=header + 1, column=c).value).strip()
+        bounds = KV_WIDTH_BOUNDS.get(name, DEFAULT_BOUNDS)
+        content = max((display_width(ws.cell(row=r, column=c).value) for r in range(1, header + 1)), default=0)
+        letter = get_column_letter(c)
+        ws.column_dimensions[letter].width = max(ws.column_dimensions[letter].width or 0, _clamp(content, bounds))
 
 
 def style_data_sheet(ws: Worksheet, *, text_cols: tuple[int, ...] = ()) -> None:
@@ -274,6 +300,8 @@ def style_rules_workbook(wb: Workbook) -> None:
             style_rule_table(ws, "规则ID", RULE_KINDS)
         elif ws.title == "测试":
             style_rule_table(ws, "用例", TEST_KINDS)
+        elif ws.title == SETTINGS_SHEET:
+            style_settings_sheet(ws)
         elif ws.title in KV_SHEETS:
             style_kv_sheet(ws)
 

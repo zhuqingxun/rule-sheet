@@ -36,8 +36,10 @@ from .model import (
     EXIST_VAR,
     FALSE_WORDS,
     FIELD_GROUP_KEY,
+    JOIN_SEP_KEY,
     NULL_WORD,
     PRIMARY_WORD,
+    SETTINGS_SHEET,
     TRUE_WORDS,
     RuleSet,
     TestCase,
@@ -221,7 +223,7 @@ def _match_text(spec: Any, primary: str) -> str:
 
 
 def _input_opts(spec: Any) -> dict[str, Any]:
-    """参照表的可选项 (只写非默认的): 独有行 + 重复键: 拼接 的四项。Excel「输入」sheet 与 YAML 输入声明共用。"""
+    """参照表的可选项 (只写非默认的): 独有行 + 重复键: 拼接 的四项。Excel「设置」sheet 的输入表与 YAML 输入声明共用。"""
     if spec.primary:
         return {}
     out: dict[str, Any] = {APPEND_KEY: "追加"} if spec.append else {}
@@ -287,13 +289,16 @@ def excel_to_yaml_doc(path: str | Path) -> tuple[dict[str, Any], RuleSet]:
             entry["重复键"] = s.dup_policy
         entry.update(_input_opts(s))
         doc["输入"][s.name] = FlowDict(entry)
-    if rs.settings:
-        doc["设置"] = {k: _plain(v) for k, v in rs.settings.items()}
+    settings = {k: _plain(v) for k, v in rs.settings.items() if k != JOIN_SEP_KEY}
+    if settings:
+        doc["设置"] = settings
     if rs.field_groups:
         doc[FIELD_GROUP_KEY] = {k: FlowList(v) for k, v in rs.field_groups.items()}
     if rs.derived:
         doc["变量"] = dict(rs.derived)
     doc["命中策略"] = rs.hit_policy
+    if JOIN_SEP_KEY in rs.settings:  # 0.8 起与命中策略并列 (Excel 写在决策表左上角)
+        doc[JOIN_SEP_KEY] = _plain(rs.settings[JOIN_SEP_KEY])
     doc["规则"] = [_rule_doc(tr, r) for r in raw]  # 输出格取原文: 字段组名下的格保持 组名: 输入名 的形态
     if rs.tests:
         doc["测试"] = [{"用例": t.name, "输入": _given(t.inputs), "期望": _given(t.expected)} for t in rs.tests]
@@ -610,7 +615,8 @@ def _excel_value(v: Any) -> Any:
 
 
 def yaml_to_workbook(path: str | Path) -> Workbook:
-    """YAML 规则文件 -> 规则工作簿 (五张 sheet, 版式按 style 规范套好)。条件不在表格子集里的报错。"""
+    """YAML 规则文件 -> 规则工作簿 (设置 / 变量定义 / 字段组 / 决策表 / 测试, 版式按 style 规范套好)。
+    条件不在表格子集里的报错。"""
     src = Path(path)
     doc = yaml.safe_load(src.read_text(encoding="utf-8")) or {}
     rs = load_yaml_rules(src)
@@ -647,7 +653,12 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "输入"
+    ws.title = SETTINGS_SHEET  # 上方设置项, 空一行, 下方输入表
+    settings = {k: v for k, v in rs.settings.items() if k != JOIN_SEP_KEY}
+    for k, v in settings.items():
+        ws.append([k, _excel_value(v)])
+    if settings:
+        ws.append([])
     used = {k for s in rs.inputs for k in _input_opts(s)}
     opt_cols = ([APPEND_KEY] if APPEND_KEY in used else []) + (list(CONCAT_OPTS) if used & set(CONCAT_OPTS) else [])
     ws.append(["名称", "匹配", "重复键", *opt_cols, "文件", "说明"])
@@ -658,11 +669,6 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
             + [opts.get(k) for k in opt_cols]
             + [s.path, None]
         )
-    if rs.settings:
-        ws = wb.create_sheet("设置")
-        ws.append(["设置项", "值", "说明"])
-        for k, v in rs.settings.items():
-            ws.append([k, _excel_value(v), None])
     if rs.derived:
         ws = wb.create_sheet("变量定义")
         ws.append(["变量", "定义", "说明"])
@@ -676,6 +682,8 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
 
     ws = wb.create_sheet("决策表")
     ws.append(["命中策略", rs.hit_policy])
+    if JOIN_SEP_KEY in rs.settings:
+        ws.append([JOIN_SEP_KEY, _excel_value(rs.settings[JOIN_SEP_KEY])])
     ws.append(["规则ID", "优先级", *["输入"] * len(columns), *["输出"] * len(headers), "说明"])
     ws.append(["规则ID", "优先级", *columns, *headers, "说明"])
     for rid, priority, branches, thens, desc in parsed:

@@ -339,7 +339,8 @@ def test_yaml_to_excel_round_trips(excel, yaml_file, data_dir, tmp_path):
     再 Excel -> YAML -> Excel 一圈仍然一致。"""
     out = export_workbook(yaml_file, tmp_path / "from_yaml.xlsx")
     wb = load_workbook(out)
-    assert wb.sheetnames[0] == "输入" and "决策表" in wb.sheetnames and "测试" in wb.sheetnames
+    assert wb.sheetnames[0] == "设置" and "输入" not in wb.sheetnames  # 0.8: 输入表在「设置」里
+    assert "决策表" in wb.sheetnames and "测试" in wb.sheetnames
     assert wb["决策表"].freeze_panes and wb["决策表"].cell(1, 1).value == "命中策略"  # 版式已套
     rs = load_rules(out)
     failed = [(o.name, o.problems, o.error) for o in run_tests(rs) if not o.passed]
@@ -372,7 +373,7 @@ def test_field_groups_survive_both_directions_and_diff(tmp_path):
     )  # 则: 里不展开 (用例输入里当然有 上期.例会结论)
     out = export_workbook(CARRY_YAML, tmp_path / "c.xlsx")
     wb = load_workbook(out)
-    assert wb.sheetnames == ["输入", "设置", "字段组", "决策表", "测试"]
+    assert wb.sheetnames == ["设置", "字段组", "决策表", "测试"]
     assert [wb["字段组"].cell(2, c).value for c in (1, 2)] == [
         "会议记录",
         "例会时间, 类别-会议, 状态-会议, 例会结论, 备注, 待跟进事宜",
@@ -411,7 +412,7 @@ def test_concat_input_options_survive_both_directions(tmp_path):
     )
     assert "推荐.现岗: 拼接(推荐.现部门" in text  # 带前缀的派生变量照常导出
     out = export_workbook(CAND_YAML, tmp_path / "c.xlsx")
-    ws = load_workbook(out)["输入"]
+    ws = load_workbook(out)["设置"]  # 没有设置项: 输入表从第 1 行开始
     header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
     assert header == ["名称", "匹配", "重复键", "排序", "分隔符", "空值占位", "带序号", "文件", "说明"]
     rows = {ws.cell(r, 1).value: [ws.cell(r, c).value for c in range(2, 9)] for r in (2, 3, 4)}
@@ -432,7 +433,7 @@ def test_append_option_survives_both_directions(tmp_path):
         encoding="utf-8",
     )
     out = export_workbook(src, tmp_path / "a.xlsx")
-    ws = load_workbook(out)["输入"]
+    ws = load_workbook(out)["设置"]
     assert [ws.cell(1, c).value for c in range(1, 7)] == ["名称", "匹配", "重复键", "独有行", "文件", "说明"]
     assert [ws.cell(3, c).value for c in range(1, 6)] == ["上期", "编码", "取第一条", "追加", "b.xlsx"]
     rs = load_rules(out)

@@ -34,9 +34,11 @@ from .model import (
     HIT_POLICIES,
     JOIN_POLICY,
     JOIN_SEP_KEY,
+    LEGACY_INPUTS_SHEET,
     NULL_WORD,
     PRIMARY_WORD,
     SETTING_KEYS,
+    SETTINGS_SHEET,
     TRUE_WORDS,
     Branch,
     Condition,
@@ -51,7 +53,7 @@ TEST_KINDS = ("用例", "输入", "期望", "说明")
 INPUT_COLS = ("名称", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "文件", "说明")
 INPUT_KEYS = ("文件", "匹配", "重复键", APPEND_KEY, *CONCAT_OPTS, "说明")  # YAML 输入声明认的键
 # YAML 各层认的键: 拼错的键 (命中测略 / 期待 / ID) 静默不生效会让规则悄悄换策略、用例假通过, 一律报错
-YAML_TOP_KEYS = ("输入", "匹配", "设置", "变量", FIELD_GROUP_KEY, "命中策略", "规则", "测试")
+YAML_TOP_KEYS = ("输入", "匹配", "设置", "变量", FIELD_GROUP_KEY, "命中策略", JOIN_SEP_KEY, "规则", "测试")
 YAML_RULE_KEYS = ("编号", "名称", "优先级", "当", "则", "分支")
 YAML_TEST_KEYS = ("用例", "输入", "期望")
 INPUT_OPTS = (APPEND_KEY, *CONCAT_OPTS)  # 「输入」里除 名称 / 匹配 / 重复键 / 文件 之外的可选项, 都只对参照表有意义
@@ -215,11 +217,23 @@ def _build_inputs(rows: list[tuple[str, Any, Any, Any, dict[str, Any]]], where: 
     return specs
 
 
-def _check_settings(settings: dict[str, Any], where: str) -> dict[str, Any]:
-    bad = [k for k in settings if k not in SETTING_KEYS]
+def _check_settings(settings: dict[str, Any], where: str, *, legacy_sep: bool) -> dict[str, Any]:
+    """legacy_sep: 旧写法 (单独的「输入」sheet / YAML 设置:) 里的 拼接分隔符 仍认; 新版「设置」sheet 里写它报错指路。"""
+    if JOIN_SEP_KEY in settings and not legacy_sep:
+        raise ValueError(f"{where}: 「{JOIN_SEP_KEY}」写在决策表左上角「{POLICY_LABEL}」下面一行 (只给 多条拼接 用)")
+    bad = [k for k in settings if k not in (*SETTING_KEYS, JOIN_SEP_KEY)]
     if bad:
         raise ValueError(f"{where}: 设置项「{bad[0]}」不认识, 只认: {' / '.join(SETTING_KEYS)}")
     return {k: v for k, v in settings.items() if v not in (None, "")}
+
+
+def _merge_join_sep(settings: dict[str, Any], sep: Any, where: str) -> dict[str, Any]:
+    """决策表左上角 / YAML 顶层的 拼接分隔符 并进 settings (引擎从那里读); 与旧写法两处都写了报错, 不猜听谁的。"""
+    if sep in (None, ""):
+        return settings
+    if JOIN_SEP_KEY in settings:
+        raise ValueError(f"「{JOIN_SEP_KEY}」写了两处 ({where} 和「设置」), 删掉「设置」里的那个")
+    return {**settings, JOIN_SEP_KEY: sep}
 
 
 def _legacy_inputs(match: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
@@ -409,21 +423,70 @@ def _read_kv(ws: Any) -> dict[str, Any]:
     return out
 
 
-def _read_inputs_sheet(ws: Any) -> list[InputSpec]:
-    """「输入」sheet: 第 1 行列名 (名称 / 匹配 / 重复键 / 文件 / 说明, 顺序随意), 之后每行一个输入。"""
-    grid = _rows(ws)
-    header = [_text(v) for v in grid[0]] if grid else []
+def _read_inputs_table(grid: list[list[Any]], header_row: int, where: str) -> list[InputSpec]:
+    """输入表: header_row 行是列名 (名称 / 匹配 / 重复键 / 文件 / 说明, 顺序随意), 之后每行一个输入。"""
+    header = [_text(v) for v in grid[header_row]] if header_row < len(grid) else []
     col = {h: i for i, h in enumerate(header) if h}
     for need in ("名称", "匹配"):
         if need not in col:
-            raise ValueError(f"「输入」sheet 第 1 行缺少「{need}」列 (列名: {' / '.join(INPUT_COLS)})")
+            raise ValueError(f"{where} 第 {header_row + 1} 行缺少「{need}」列 (列名: {' / '.join(INPUT_COLS)})")
     rows = []
-    for row in grid[1:]:
+    for row in grid[header_row + 1 :]:
         name = _text(_at(row, col["名称"]))
         if name:
             opts = {k: _at(row, col[k]) for k in INPUT_OPTS if k in col}
             rows.append((name, _at(row, col["匹配"]), _at(row, col.get("重复键")), _at(row, col.get("文件")), opts))
-    return _build_inputs(rows, "「输入」sheet")
+    return _build_inputs(rows, where)
+
+
+def input_header_row(grid: list[list[Any]]) -> int | None:
+    """「设置」sheet 里输入表的列名行: 第一个同时有「名称」和「匹配」两格的行 (0 起); 没有返回 None。"""
+    for i, row in enumerate(grid):
+        cells = {_text(v) for v in row}
+        if "名称" in cells and "匹配" in cells:
+            return i
+    return None
+
+
+def read_setting_rows(rows: list[list[Any]]) -> dict[str, Any]:
+    """设置项行: 每行第一个有字的格是设置项, 紧挨着它右边一格是值, 再往右是说明; 值为空的行跳过 (标题 / 说明行)。
+    旧版「设置」sheet 的表头行 (设置项 / 值) 也跳过, 所以新旧两种「设置」sheet 用同一个读法。"""
+    out: dict[str, Any] = {}
+    for row in rows:
+        j = next((k for k, v in enumerate(row) if _text(v)), None)
+        if j is None:
+            continue
+        label = _text(row[j]).rstrip(":：")
+        value = _at(row, j + 1)
+        if label == "设置项" or value in (None, ""):
+            continue
+        out[label] = value
+    return out
+
+
+def _read_inputs_and_settings(wb: Any, path: Path) -> tuple[list[InputSpec], dict[str, Any]]:
+    """0.8: 「设置」sheet 上方设置项、下方输入表。旧写法 (单独的「输入」sheet + 只有设置项的「设置」sheet) 保留一个版本;
+    两处都有输入表报错, 不猜听谁的。"""
+    grid = _rows(wb[SETTINGS_SHEET]) if SETTINGS_SHEET in wb.sheetnames else []
+    header = input_header_row(grid)
+    where = f"「{SETTINGS_SHEET}」sheet"
+    if header is not None:
+        if LEGACY_INPUTS_SHEET in wb.sheetnames:
+            raise ValueError(
+                f"{where} 里已经有输入表, 又有「{LEGACY_INPUTS_SHEET}」sheet; 输入表 0.8 起写在{where}里, "
+                f"删掉「{LEGACY_INPUTS_SHEET}」sheet"
+            )
+        inputs = _read_inputs_table(grid, header, f"{where}的输入表")
+        return inputs, _check_settings(read_setting_rows(grid[:header]), where, legacy_sep=False)
+    if LEGACY_INPUTS_SHEET in wb.sheetnames:
+        inputs = _read_inputs_table(_rows(wb[LEGACY_INPUTS_SHEET]), 0, f"「{LEGACY_INPUTS_SHEET}」sheet")
+        return inputs, _check_settings(read_setting_rows(grid), where, legacy_sep=True)
+    if "匹配设置" in wb.sheetnames:  # 0.4 以前的写法, 保留一个版本的兼容
+        return _legacy_inputs(_read_kv(wb["匹配设置"]))
+    raise ValueError(
+        f"规则文件缺少输入表: {where}里要有一行写列名 名称 / 匹配 (还可以有 重复键 / 文件 / 说明 等), "
+        f"下面每行声明一个输入 (名字、怎么对齐到主表): {path.name}"
+    )
 
 
 def _parse_header(
@@ -473,6 +536,17 @@ def _find_policy(grid: list[list[Any]], kind_row: int) -> Any:
             return next((c for c in cells[j + 1 :] if c), "")
         fallback = fallback or next((c for c in cells if c in HIT_POLICIES), None)
     return fallback
+
+
+def find_meta_value(grid: list[list[Any]], kind_row: int, label: str) -> Any:
+    """列类型行之上的元信息行里, 写着 label 的格紧挨着的右边一格 (原值); 没有这个标签或右边为空返回 None。
+    只取紧挨着的一格: 值留空时不能把再右边的说明文字当成值。"""
+    for row in grid[:kind_row]:
+        for j, v in enumerate(row):
+            if _text(v).rstrip(":：") == label:
+                value = _at(row, j + 1)
+                return None if value in (None, "") else value  # 不 strip: 分隔符可以是空格
+    return None
 
 
 @dataclass
@@ -587,13 +661,7 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
     wb = load_workbook(path, data_only=False)
     if "决策表" not in wb.sheetnames:
         raise ValueError(f"规则文件缺少「决策表」sheet: {path.name}")
-    if "输入" in wb.sheetnames:
-        inputs = _read_inputs_sheet(wb["输入"])
-        settings = _check_settings(_read_kv(wb["设置"]), "「设置」sheet") if "设置" in wb.sheetnames else {}
-    elif "匹配设置" in wb.sheetnames:  # 0.4 以前的写法, 保留一个版本的兼容
-        inputs, settings = _legacy_inputs(_read_kv(wb["匹配设置"]))
-    else:
-        raise ValueError(f"规则文件缺少「输入」sheet (声明有哪些输入、怎么对齐到主表): {path.name}")
+    inputs, settings = _read_inputs_and_settings(wb, path)
     names = [s.name for s in inputs]
     derived: list[tuple[str, str]] = []
     if "变量定义" in wb.sheetnames:
@@ -608,6 +676,7 @@ def load_excel_raw(path: Path) -> tuple[RuleSet, list[RawRule]]:
     grid = _rows(wb["决策表"])
     cols, kind_row, body_start = _parse_header(grid, "决策表", "规则ID", RULE_KINDS)
     hit_policy = _check_policy(_find_policy(grid, kind_row))
+    settings = _merge_join_sep(settings, find_meta_value(grid, kind_row, JOIN_SEP_KEY), "决策表左上角")
     raw = read_decision_rows(grid, cols, body_start)
     rules = [_excel_rule(r, groups, names) for r in raw]
     # 输入格原文 + 展开后的输出格 (含分支的), 之后扫描里面引用的变量 (!= 上期.x / =本期.y * 2 / 字段组展开出的 上期.z);
@@ -674,7 +743,8 @@ def _yaml_inputs(doc: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
         raise ValueError("YAML 里 输入: 和旧写法 匹配: 不能同时出现")
     if "输入" not in doc:
         inputs, settings = _legacy_inputs(dict(doc.get("匹配") or {}))
-        settings.update(_check_settings(dict(doc.get("设置") or {}), "YAML 设置:"))  # 设置: 不能因为没写 输入: 就被忽略
+        # 设置: 不能因为没写 输入: 就被忽略
+        settings.update(_check_settings(dict(doc.get("设置") or {}), "YAML 设置:", legacy_sep=True))
         return inputs, settings
     rows = []
     for name, v in (doc.get("输入") or {}).items():
@@ -687,7 +757,8 @@ def _yaml_inputs(doc: dict[str, Any]) -> tuple[list[InputSpec], dict[str, Any]]:
         else:
             rows.append((str(name), None, None, v, {}))  # 只写一个字符串 = 文件名
     inputs = _build_inputs(rows, "YAML 输入:")
-    settings = _check_settings(dict(doc.get("设置") or {}), "YAML 设置:")
+    # 设置: 里的 拼接分隔符 是 0.7 的写法, 仍认; 0.8 起写在顶层 (与 命中策略: 并列), 在 load_yaml_rules 里合并
+    settings = _check_settings(dict(doc.get("设置") or {}), "YAML 设置:", legacy_sep=True)
     return inputs, settings
 
 
@@ -727,6 +798,7 @@ def load_yaml_rules(path: Path) -> RuleSet:
     for i, t in enumerate(doc.get("测试") or [], 1):
         _check_yaml_keys(t, YAML_TEST_KEYS, f"YAML 第 {i} 条测试用例")
     inputs, settings = _yaml_inputs(doc)
+    settings = _merge_join_sep(settings, doc.get(JOIN_SEP_KEY), "YAML 顶层")
     names = [s.name for s in inputs]
     derived = [(str(k), str(v)) for k, v in (doc.get("变量") or {}).items()]
     groups = _check_field_groups(_yaml_field_groups(doc), names, f"YAML {FIELD_GROUP_KEY}:", [k for k, _ in derived])
