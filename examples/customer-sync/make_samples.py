@@ -20,7 +20,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from rule_sheet.style import style_data_sheet, style_rules_workbook
+from rule_sheet.style import INPUTS_TITLE, SETTINGS_TITLE, style_data_sheet, style_rules_workbook
 
 ROOT = Path(__file__).resolve().parent
 
@@ -75,13 +75,14 @@ def build_data() -> None:
 def build_rules() -> None:
     wb = Workbook()
 
-    # ---- sheet 1: 设置 (上方设置项: A 列名字 / B 列值 / 再往右说明; 空一行; 下方输入表) ----
+    # ---- sheet 1: 设置 (「设置项」标题 + 设置项: A 列名字 / B 列值 / 再往右说明; 空一行; 「输入表」标题 + 输入表) ----
     # 输入表是形参: 名称 + 怎么对齐到主表; 文件只是默认绑定, 命令行 -i 可覆盖
     new_sheet(wb, "设置", [
+        SETTINGS_TITLE,
         ("基准日期", date(2026, 10, 19), "天数差 / N天 等日期计算用的「今天」, 日期格或 2026-10-19 文本都行。留空取运行当天; 每批不同的在运行时给 (--var 基准日期=...), 这里的值仍是内嵌测试用的"),
         ("输出", "output/客户主表_更新后.xlsx", "默认输出路径, 相对本规则文件所在目录, 命令行 -o 可覆盖。留空为 output/<主表文件名>_更新后.xlsx"),
-        ("可用设置项", None, "只认 基准日期 / 输出, 写别的加载时报错 (不会静默忽略); B 列留空 = 取默认值。下面「名称 / 匹配」那一行起是输入表"),
         (None, None, None),
+        INPUTS_TITLE,
         ("名称", "匹配", "重复键", "文件", "说明"),
         ("客户", "主表", None, "客户主表.xlsx", "被更新的表: 输出的行就是它的行。规则里引用它的列写 客户.状态; 相对路径以本规则文件所在目录为基准"),
         ("本月", "客户编号", "取第一条", "本月流水.xlsx", "参照表, 按 客户编号 对齐到主表 (多个键用逗号分隔); 引用写 本月.金额, 本月.存在 = 是否匹配到"),

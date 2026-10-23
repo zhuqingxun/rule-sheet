@@ -44,7 +44,7 @@ from .model import (
     RuleSet,
     TestCase,
 )
-from .style import style_rules_workbook
+from .style import INPUTS_TITLE, SETTINGS_TITLE, style_rules_workbook
 
 _DATE_TEXT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CMP_OPS = {"=": "==", "==": "==", "<>": "!=", "!=": "!=", ">": ">", ">=": ">=", "<": "<", "<=": "<="}
@@ -653,12 +653,15 @@ def yaml_to_workbook(path: str | Path) -> Workbook:
 
     wb = Workbook()
     ws = wb.active
-    ws.title = SETTINGS_SHEET  # 上方设置项, 空一行, 下方输入表
+    ws.title = SETTINGS_SHEET  # 「设置项」标题 + 设置项, 空一行, 「输入表」标题 + 输入表
     settings = {k: v for k, v in rs.settings.items() if k != JOIN_SEP_KEY}
+    if settings:
+        ws.append(list(SETTINGS_TITLE))
     for k, v in settings.items():
         ws.append([k, _excel_value(v)])
     if settings:
         ws.append([])
+    ws.append(list(INPUTS_TITLE))
     used = {k for s in rs.inputs for k in _input_opts(s)}
     opt_cols = ([APPEND_KEY] if APPEND_KEY in used else []) + (list(CONCAT_OPTS) if used & set(CONCAT_OPTS) else [])
     ws.append(["名称", "匹配", "重复键", *opt_cols, "文件", "说明"])

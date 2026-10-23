@@ -72,10 +72,26 @@ KV_WIDTH_BOUNDS = {
     NOTE: (30, 70),
 }
 DEFAULT_BOUNDS = (8, 40)
-PADDING = 2  # 内容宽度之外的留白 (字符)
+PADDING = 2  # 内容宽度之外的留白 (字符); Excel 显示的列宽比写入值少约 0.6, 实际留白约 1.4
+# 一个中文字在 Excel 默认字体 (等线 11) 下约占 2.05 (常规) ~ 2.15 (加粗) 个列宽单位 (2026-10-23 用 Excel AutoFit 实测);
+# 按 2 算会让长度接近列宽的格被右边的格挡住一截
+WIDE_CHAR = 2.2
 LINE_HEIGHT = 15.0  # Excel 默认行高 (磅), 换行格的行高 = 行数 * 它
 DATE_FORMAT = "yyyy-mm-dd"
 KV_SHEETS = ("输入", "设置", "变量定义", "字段组", "匹配设置")
+# 「设置」sheet 两块内容上方的标题行: B 列留空, 加载器按「值为空」跳过 (设置项 这个词也被显式跳过);
+# 样例生成脚本与 YAML -> Excel 共用
+SETTINGS_TITLE = (
+    "设置项",
+    None,
+    "每行一项: A 列名字 / B 列值 / 再往右是说明; 只认 基准日期 / 输出, 写别的加载时报错; B 列留空 = 取默认值",
+)
+INPUTS_TITLE = (
+    "输入表",
+    None,
+    "下一行是列名, 之后每行声明一个输入: 名称 = 规则里的前缀; 匹配 = 主表写 主表, 其它写对齐到主表的键; "
+    "文件 = 默认文件 (命令行 -i 可覆盖)。输入表下面不要再写别的",
+)
 
 _THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
@@ -104,15 +120,21 @@ def cell_text(value: Any) -> str:
     return str(value)
 
 
-def display_width(value: Any) -> int:
-    """显示宽度 (字符数): 中文等全角 / 宽字符算 2, 多行取最宽的一行。"""
+def display_width(value: Any) -> float:
+    """显示宽度 (Excel 列宽单位): 中文等全角 / 宽字符算 WIDE_CHAR, 其余算 1, 多行取最宽的一行。"""
     lines = cell_text(value).split("\n")
-    return max(sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in line) for line in lines)
+    return max(sum(WIDE_CHAR if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in line) for line in lines)
 
 
-def _clamp(width: int, bounds: tuple[int, int]) -> int:
+def _clamp(width: float, bounds: tuple[int, int]) -> float:
     lo, hi = bounds
     return max(lo, min(hi, width + PADDING))
+
+
+def _widen(ws: Worksheet, col: int, value: Any, bounds: tuple[int, int]) -> None:
+    """按一个格的内容把列放宽 (只放宽不收窄, 仍在区间内): 元信息行的标签 / 值不参与正文定宽, 但要显示全。"""
+    dim = ws.column_dimensions[get_column_letter(col)]
+    dim.width = max(dim.width or 0, _clamp(display_width(value), bounds))
 
 
 def _lines_needed(value: Any, width: int) -> int:
@@ -218,6 +240,13 @@ def style_rule_table(ws: Worksheet, key_kind: str, allowed: tuple[str, ...]) -> 
 
     columns = {c: WIDTH_BOUNDS.get(kind_by_col.get(c, ""), DEFAULT_BOUNDS) for c in range(1, ncols + 1)}
     _set_widths_and_wrap(ws, columns, range(header_rows[0], last + 1), wrap_rows=body)
+    for r in range(1, kind_row + 1):  # 元信息行的标签 (命中策略 / 拼接分隔符) 和紧挨着的值要显示全, 说明照旧溢出
+        for c in range(1, ncols + 1):
+            text = str(ws.cell(row=r, column=c).value or "").strip().rstrip(":：")
+            if text in (POLICY_LABEL, JOIN_SEP_KEY):
+                _widen(ws, c, text, columns[c])
+                if c + 1 in columns:
+                    _widen(ws, c + 1, ws.cell(row=r, column=c + 1).value, columns[c + 1])
     frozen = 0
     for c in range(1, ncols + 1):  # 最左边连续的 ID 类列冻结住
         if kind_by_col.get(c) in ID_KINDS:
@@ -265,12 +294,12 @@ def style_settings_sheet(ws: Worksheet) -> None:
             _style_cell(cell, bold=(c == cells[0]), color=FILLS[NOTE] if c > cells[0] + 1 else None)
             _fix_value_format(cell)
     style_kv_sheet(ws, header_row=header + 1)
-    for c in (1, 2):  # 设置项与值要显示全: 在输入表算出的宽度上按它们再放宽 (仍在该列的区间内)
-        name = cell_text(ws.cell(row=header + 1, column=c).value).strip()
-        bounds = KV_WIDTH_BOUNDS.get(name, DEFAULT_BOUNDS)
-        content = max((display_width(ws.cell(row=r, column=c).value) for r in range(1, header + 1)), default=0)
-        letter = get_column_letter(c)
-        ws.column_dimensions[letter].width = max(ws.column_dimensions[letter].width or 0, _clamp(content, bounds))
+    # 设置项与值要显示全 (右边有说明挡着, 不能溢出): 在输入表算出的宽度上按它们放宽, 区间取 设置项 / 值 的
+    for r in range(1, header + 1):
+        cells = [c for c in range(1, len(grid[r - 1]) + 1) if ws.cell(row=r, column=c).value not in (None, "")]
+        if cells:
+            _widen(ws, cells[0], ws.cell(row=r, column=cells[0]).value, KV_WIDTH_BOUNDS["设置项"])
+            _widen(ws, cells[0] + 1, ws.cell(row=r, column=cells[0] + 1).value, KV_WIDTH_BOUNDS["值"])
 
 
 def style_data_sheet(ws: Worksheet, *, text_cols: tuple[int, ...] = ()) -> None:

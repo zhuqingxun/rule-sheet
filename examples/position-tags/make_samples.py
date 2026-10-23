@@ -29,7 +29,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from rule_sheet.style import style_data_sheet, style_rules_workbook
+from rule_sheet.style import INPUTS_TITLE, SETTINGS_TITLE, style_data_sheet, style_rules_workbook
 
 ROOT = Path(__file__).resolve().parent
 
@@ -89,10 +89,11 @@ def build_rules() -> None:
 
     # ---- sheet 1: 设置 (上方设置项; 空一行; 下方输入表) ----------------------------
     new_sheet(wb, "设置", [
+        SETTINGS_TITLE,
         ("基准日期", datetime(2026, 10, 1), "天数差 / N天 等日期计算用的「今天」(本表的「近一年推荐」以它为准), 日期格或 2026-10-01 文本都行。留空取运行当天"),
         ("输出", "output/岗位清单_更新后.xlsx", "默认输出路径, 相对本规则文件所在目录, 命令行 -o 可覆盖。留空为 output/<主表文件名>_更新后.xlsx"),
-        ("可用设置项", None, "只认 基准日期 / 输出, 写别的加载时报错 (不会静默忽略); B 列留空 = 取默认值。拼接分隔符 写在决策表左上角。下面「名称 / 匹配」那一行起是输入表"),
         (None, None, None),
+        INPUTS_TITLE,
         ("名称", "匹配", "重复键", "文件", "说明"),
         ("岗位", "主表", None, "岗位清单.xlsx", "被更新的表: 输出的行就是它的行。规则里引用它的列写 岗位.岗位名称"),
         ("关键岗位清单", "岗位编码", "取第一条", "关键岗位清单.xlsx",

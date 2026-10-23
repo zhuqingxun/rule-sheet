@@ -27,7 +27,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from rule_sheet.style import style_data_sheet, style_rules_workbook
+from rule_sheet.style import INPUTS_TITLE, SETTINGS_TITLE, style_data_sheet, style_rules_workbook
 
 ROOT = Path(__file__).resolve().parent
 
@@ -80,8 +80,10 @@ def build_rules() -> None:
 
     # ---- sheet 1: 设置 (上方设置项; 空一行; 下方输入表, 上期 独有行 = 追加) --------------
     new_sheet(wb, "设置", [
+        SETTINGS_TITLE,
         ("输出", "output/本期全量_更新后.xlsx", "默认输出路径, 相对本规则文件所在目录, 命令行 -o 可覆盖"),
         (None, None, None),
+        INPUTS_TITLE,
         ("名称", "匹配", "重复键", "独有行", "文件", "说明"),
         ("本期", "主表", None, None, "本期全量.xlsx", "被更新的表: 输出的行就是它的行 (加上下面追加的)。本期.存在 在追加来的行上是 否"),
         ("上期", "岗位编码", None, "追加", "上期全量.xlsx",

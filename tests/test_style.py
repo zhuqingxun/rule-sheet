@@ -32,10 +32,11 @@ def header_row(ws, key):
     return next(r for r in range(1, 6) if ws.cell(r, 1).value == key)
 
 
-def test_display_width_counts_wide_chars_double():
-    assert display_width("abc") == 3 and display_width("中文") == 4 and display_width("a中") == 3
-    assert display_width(None) == 0 and display_width(7.0) == 1 and display_width("ab\n中文字") == 6
-    assert display_width("（全角）") == 8
+def test_display_width_counts_wide_chars_by_excel_measure():
+    """宽字符按 Excel 实测的 2.2 个列宽单位算 (按 2 算会让接近列宽的格被截一截)。"""
+    assert display_width("abc") == 3 and display_width("中文") == pytest.approx(4.4)
+    assert display_width("a中") == pytest.approx(3.2) and display_width(None) == 0 and display_width(7.0) == 1
+    assert display_width("ab\n中文字") == pytest.approx(6.6) and display_width("（全角）") == pytest.approx(8.8)
 
 
 @SAMPLES
@@ -85,6 +86,8 @@ def test_sample_workbooks_follow_the_spec(path):
         assert color(ws.cell(head + 1, note)) == FILLS["说明"] and ws.cell(head + 1, 1).font.bold
         for c, name in enumerate(header, start=1):
             lo, hi = KV_WIDTH_BOUNDS[name]
+            if sheet == "设置" and c <= 2:  # 设置项 / 值 也要显示全, 这两列可按它们的区间放宽
+                hi = max(hi, KV_WIDTH_BOUNDS["设置项" if c == 1 else "值"][1])
             assert lo <= width(ws, c) <= hi, (sheet, name)
         assert ws.freeze_panes == f"A{head + 1}"
 

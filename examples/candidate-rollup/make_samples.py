@@ -30,7 +30,7 @@ from typing import Any
 from openpyxl import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from rule_sheet.style import style_data_sheet, style_rules_workbook
+from rule_sheet.style import INPUTS_TITLE, style_data_sheet, style_rules_workbook
 
 ROOT = Path(__file__).resolve().parent
 
@@ -97,6 +97,7 @@ def build_rules() -> None:
 
     # ---- sheet 1: 设置 (没有设置项, 只有输入表; 重复键 = 拼接 的参照表多四个可选列) ------------------
     new_sheet(wb, "设置", [
+        INPUTS_TITLE,
         ("名称", "匹配", "重复键", "排序", "分隔符", "空值占位", "带序号", "文件", "说明"),
         ("岗位", "主表", None, None, None, None, None, "岗位清单.xlsx",
          "被更新的表: 输出的行就是它的行"),

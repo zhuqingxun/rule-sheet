@@ -596,8 +596,9 @@ def write_xlsx_safely(df: pd.DataFrame, path: Path) -> Path:
                 df.to_excel(xw, index=False)
                 ws = xw.sheets[next(iter(xw.sheets))]
                 for i, col in enumerate(df.columns, start=1):
-                    width = max([display_width(col)] + [display_width(v) for v in df[col].head(50)]) + 2
-                    ws.column_dimensions[get_column_letter(i)].width = min(max(width, 8), 60)
+                    # 和在 Excel 里双击列边自动调整一样: 看全部行, 不换行, 上限是 Excel 的 255
+                    width = max([display_width(col)] + [display_width(v) for v in df[col].tolist()]) + 2
+                    ws.column_dimensions[get_column_letter(i)].width = min(max(width, 8), 255)
                     if _is_date_column(df[col]):
                         for r in range(2, len(df) + 2):
                             ws.cell(row=r, column=i).number_format = "yyyy-mm-dd"

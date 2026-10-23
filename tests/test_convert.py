@@ -412,10 +412,11 @@ def test_concat_input_options_survive_both_directions(tmp_path):
     )
     assert "推荐.现岗: 拼接(推荐.现部门" in text  # 带前缀的派生变量照常导出
     out = export_workbook(CAND_YAML, tmp_path / "c.xlsx")
-    ws = load_workbook(out)["设置"]  # 没有设置项: 输入表从第 1 行开始
-    header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    ws = load_workbook(out)["设置"]  # 没有设置项: 第 1 行「输入表」标题, 第 2 行起输入表
+    assert ws.cell(1, 1).value == "输入表" and ws.cell(1, 2).value is None
+    header = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
     assert header == ["名称", "匹配", "重复键", "排序", "分隔符", "空值占位", "带序号", "文件", "说明"]
-    rows = {ws.cell(r, 1).value: [ws.cell(r, c).value for c in range(2, 9)] for r in (2, 3, 4)}
+    rows = {ws.cell(r, 1).value: [ws.cell(r, c).value for c in range(2, 9)] for r in (3, 4, 5)}
     assert rows["推荐"] == ["岗位编码", "拼接", "推荐时间 降序", None, "NA", None, "推荐记录.xlsx"]
     assert rows["冻结"] == ["工号 = 岗位.现任工号", "拼接", "冻结开始 降序", None, None, "是", "冻结记录.xlsx"]
     p = tmp_path / "g.yaml"
@@ -434,8 +435,8 @@ def test_append_option_survives_both_directions(tmp_path):
     )
     out = export_workbook(src, tmp_path / "a.xlsx")
     ws = load_workbook(out)["设置"]
-    assert [ws.cell(1, c).value for c in range(1, 7)] == ["名称", "匹配", "重复键", "独有行", "文件", "说明"]
-    assert [ws.cell(3, c).value for c in range(1, 6)] == ["上期", "编码", "取第一条", "追加", "b.xlsx"]
+    assert [ws.cell(2, c).value for c in range(1, 7)] == ["名称", "匹配", "重复键", "独有行", "文件", "说明"]
+    assert [ws.cell(4, c).value for c in range(1, 6)] == ["上期", "编码", "取第一条", "追加", "b.xlsx"]
     rs = load_rules(out)
     assert rs.lookups[0].append is True and rs.variables == ["本期.存在"]
     assert [o.passed for o in run_tests(rs)] == [True]

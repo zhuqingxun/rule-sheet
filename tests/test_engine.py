@@ -18,6 +18,7 @@ from rule_sheet.engine import (
     write_xlsx_safely,
 )
 from rule_sheet.model import InputSpec, Rule, RuleSet, TestCase
+from rule_sheet.style import display_width
 
 # ---------------------------------------------------------------------------
 # read_table
@@ -654,3 +655,12 @@ def test_date_columns_written_with_date_format(tmp_path):
     formats = {ws.cell(1, c).value: ws.cell(2, c).number_format for c in range(1, 5)}
     assert formats["全日期"] == "yyyy-mm-dd" and formats["原生"] == "yyyy-mm-dd"
     assert formats["混合"] != "yyyy-mm-dd" and formats["全空"] != "yyyy-mm-dd"
+
+
+def test_output_column_widths_fit_all_rows(tmp_path):
+    """输出文件列宽和 Excel 里双击列边一样: 看全部行 (以前只看前 50 行、上限 60, 后面的长值被右边的列挡住)。"""
+    long_text = "华东区域-上海-浦东新区-陆家嘴金融贸易区-某某大厦-第三十八层-综合管理部-行政与后勤保障组"
+    df = pd.DataFrame({"岗位": ["短"] * 60 + [long_text], "编码": ["P1"] * 61})
+    ws = load_workbook(write_xlsx_safely(df, tmp_path / "o.xlsx"))["Sheet1"]
+    assert ws.column_dimensions["A"].width >= display_width(long_text) > 60
+    assert ws.column_dimensions["B"].width == 8  # 短列不低于 8
